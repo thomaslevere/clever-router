@@ -9,7 +9,7 @@ COPY admin/ ./
 RUN npm run build
 
 ######## Stage 2: build the Go gateway (static binary) ########
-FROM golang:1.24-alpine AS gateway
+FROM golang:alpine AS gateway
 WORKDIR /app/gateway
 ENV CGO_ENABLED=0 GOOS=linux
 COPY gateway/go.mod gateway/go.sum ./

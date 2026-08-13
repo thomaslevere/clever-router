@@ -414,8 +414,15 @@ func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapte
 	const maxInterval = 5 * time.Second
 
 	for time.Now().Before(deadline) {
-		if _, err := httpGet(ctx, url, 4*time.Second); err == nil {
-			return true
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err == nil {
+			resp, err := http.DefaultClient.Do(req)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode < 500 {
+					return true
+				}
+			}
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {

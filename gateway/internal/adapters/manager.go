@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/go-connections/nat"
 )
 
 const (
@@ -164,10 +165,16 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 			"managed-by": "clever-route",
 		},
 	}
+	internalPortStr := fmt.Sprintf("%d/tcp", ad.InternalPort(r))
 	host := &container.HostConfig{
 		Binds:         ad.Mounts(r),
 		RestartPolicy: container.RestartPolicy{Name: "unless-stopped"},
 		AutoRemove:    false,
+		PortBindings: nat.PortMap{
+			nat.Port(internalPortStr): []nat.PortBinding{
+				{HostIP: "127.0.0.1", HostPort: ""},
+			},
+		},
 		// GAP-2 FIX: enforce resource limits to prevent a runaway container
 		// from starving the control plane or other routers.
 		Resources: container.Resources{
@@ -196,7 +203,7 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	if err != nil {
 		return fmt.Errorf("resolve address: %w", err)
 	}
-	panel := fmt.Sprintf("http://%s:%d%s", hostOnly(addr), ad.InternalPort(r), ad.NativePanelPath(r))
+	panel := strings.TrimRight(addr, "/") + ad.NativePanelPath(r)
 
 	if err := m.store.UpdateRouterState(ctx, r.ID, "starting", addr, created.ID, panel, "unknown"); err != nil {
 		return err
@@ -355,14 +362,30 @@ func (m *Manager) stopAndRemove(ctx context.Context, r *store.Router, strict boo
 	return nil
 }
 
-// resolveAddr returns the container's IP on the clever-route-net network.
-// M-3 FIX: prefer our named network, fall back to any non-empty IP rather than
-// taking the last entry from a random map iteration.
+// resolveAddr returns the container's published host port address or IP on clever-route-net.
 func (m *Manager) resolveAddr(ctx context.Context, containerID string, port int) (string, error) {
 	insp, err := m.docker.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return "", err
 	}
+	internalPort := nat.Port(fmt.Sprintf("%d/tcp", port))
+
+	// 1. Prefer published host port binding on 127.0.0.1 (essential for Docker socket/containerized control planes)
+	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
+		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok && len(bindings) > 0 {
+			for _, b := range bindings {
+				if b.HostPort != "" {
+					hostIP := b.HostIP
+					if hostIP == "" || hostIP == "0.0.0.0" {
+						hostIP = "127.0.0.1"
+					}
+					return fmt.Sprintf("http://%s:%s", hostIP, b.HostPort), nil
+				}
+			}
+		}
+	}
+
+	// 2. Fallback to container network IP
 	ip := ""
 	if insp.NetworkSettings != nil {
 		// Prefer our dedicated network.
@@ -380,7 +403,7 @@ func (m *Manager) resolveAddr(ctx context.Context, containerID string, port int)
 		}
 	}
 	if ip == "" {
-		return "", fmt.Errorf("no network IP for container %s (attached networks: %v)",
+		return "", fmt.Errorf("no network IP or port binding for container %s (attached networks: %v)",
 			containerID, networkNames(insp.NetworkSettings))
 	}
 	return fmt.Sprintf("http://%s:%d", ip, port), nil

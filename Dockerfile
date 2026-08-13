@@ -17,14 +17,15 @@ RUN go mod download
 COPY gateway/ ./
 RUN go build -trimpath -ldflags="-s -w" -o /out/gateway ./cmd/server
 
-######## Stage 3: runtime (Ubuntu 22.04 LTS base image) ########
-FROM ubuntu:22.04 AS runtime
+######## Stage 3: runtime (Ubuntu latest base image) ########
+FROM ubuntu:latest AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PORT=8080 \
     ADMIN_INTERNAL_ADDR=127.0.0.1:3000 \
     APP_ENV=production \
-    HOSTNAME=127.0.0.1
+    HOSTNAME=127.0.0.1 \
+    PATH="/usr/local/bin:${PATH}"
 
 # Install base Ubuntu system tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -54,7 +55,7 @@ COPY --from=gateway /out/gateway /app/gateway
 COPY --from=admin /app/admin/.next/standalone /app/admin
 COPY --from=admin /app/admin/.next/static /app/admin/.next/static
 
-# Write fail-safe entrypoint script for Ubuntu container
+# Write fast entrypoint script for Ubuntu container
 RUN printf '%s\n' \
     '#!/bin/bash' \
     'set -e' \
@@ -63,7 +64,7 @@ RUN printf '%s\n' \
     'echo "[entrypoint] waiting for Next.js on :3000…"' \
     'MAX_WAIT=30; i=0' \
     'while [ $i -lt $MAX_WAIT ]; do' \
-    '  if curl -s -f http://127.0.0.1:3000/admin >/dev/null 2>&1; then' \
+    '  if wget -q -O /dev/null http://127.0.0.1:3000/admin 2>/dev/null; then' \
     '    break' \
     '  fi' \
     '  sleep 1; i=$((i+1))' \

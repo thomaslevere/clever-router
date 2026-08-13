@@ -50,10 +50,14 @@ func (a *API) wsTerminal(c *gin.Context) {
 	}
 	logger.Info("terminal", "system", fmt.Sprintf("%s started interactive PTY server terminal session", actorStr), store.Map{})
 
-	// Spawn real PTY process (prefer bash, fallback to sh)
-	shell := "/bin/sh"
-	if _, err := exec.LookPath("bash"); err == nil {
-		shell = "bash"
+	// Spawn real PTY process (prefer bash on Ubuntu, fallback to sh)
+	shell := "bash"
+	if _, err := exec.LookPath("bash"); err != nil {
+		if _, err2 := exec.LookPath("/bin/bash"); err2 == nil {
+			shell = "/bin/bash"
+		} else {
+			shell = "/bin/sh"
+		}
 	}
 
 	cmd := exec.Command(shell)

@@ -54,7 +54,7 @@ COPY --from=gateway /out/gateway /app/gateway
 COPY --from=admin /app/admin/.next/standalone /app/admin
 COPY --from=admin /app/admin/.next/static /app/admin/.next/static
 
-# Write entrypoint script for Ubuntu container
+# Write fail-safe entrypoint script for Ubuntu container
 RUN printf '%s\n' \
     '#!/bin/bash' \
     'set -e' \
@@ -63,7 +63,9 @@ RUN printf '%s\n' \
     'echo "[entrypoint] waiting for Next.js on :3000…"' \
     'MAX_WAIT=30; i=0' \
     'while [ $i -lt $MAX_WAIT ]; do' \
-    '  curl -s -f http://127.0.0.1:3000/admin >/dev/null 2>&1 && break' \
+    '  if curl -s -f http://127.0.0.1:3000/admin >/dev/null 2>&1; then' \
+    '    break' \
+    '  fi' \
     '  sleep 1; i=$((i+1))' \
     'done' \
     '[ $i -lt $MAX_WAIT ] && echo "[entrypoint] Next.js ready" || echo "[entrypoint] warning: Next.js timeout"' \

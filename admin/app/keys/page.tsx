@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, UnauthorizedError } from "../lib/api";
 import type { VirtualKey } from "../lib/types";
+import KeyDetailModal from "../components/KeyDetailModal";
 
 export default function KeysPage() {
   const [keys, setKeys] = useState<VirtualKey[]>([]);
+  const [selectedKey, setSelectedKey] = useState<VirtualKey | null>(null);
   const [err, setErr] = useState("");
   const [created, setCreated] = useState<string>("");
   const [copied, setCopied] = useState(false);
@@ -205,19 +207,27 @@ export default function KeysPage() {
                   </span>
                 </td>
                 <td className="px-4 py-3 text-right">
-                  {k.status === "active" && (
+                  <div className="flex items-center justify-end gap-2">
                     <button
-                      className="text-xs text-red-500 hover:text-red-700 dark:hover:text-red-400 font-semibold transition"
-                      onClick={async () => {
-                        if (confirm(`Revoke key "${k.name}"?`)) {
-                          await api.post(`/keys/${k.id}/revoke`);
-                          load();
-                        }
-                      }}
+                      className="btn-ghost text-xs py-1 px-2.5"
+                      onClick={() => setSelectedKey(k)}
                     >
-                      Revoke
+                      🔍 Inspect
                     </button>
-                  )}
+                    {k.status === "active" && (
+                      <button
+                        className="text-xs text-red-500 hover:text-red-700 dark:hover:text-red-400 font-semibold transition"
+                        onClick={async () => {
+                          if (confirm(`Revoke key "${k.name}"?`)) {
+                            await api.post(`/keys/${k.id}/revoke`);
+                            load();
+                          }
+                        }}
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}
@@ -233,6 +243,13 @@ export default function KeysPage() {
       </div>
 
       {err && <div className="card border-red-500/30 text-xs text-red-500 bg-red-500/10 p-3">{err}</div>}
+
+      {selectedKey && (
+        <KeyDetailModal
+          vkey={selectedKey}
+          onClose={() => setSelectedKey(null)}
+        />
+      )}
     </div>
   );
 }

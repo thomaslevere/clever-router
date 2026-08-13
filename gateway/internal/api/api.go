@@ -144,6 +144,7 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 	// Real-time WebSockets
 	g.GET("/ws/logs", a.wsLogs)
 	g.GET("/ws/audit", a.wsAudit)
+	g.GET("/ws/terminal", a.wsTerminal)
 
 	// System & Aggregator Logs
 	g.GET("/logs", a.listLogs)

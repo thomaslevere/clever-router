@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, UnauthorizedError } from "../../lib/api";
 import type { Credential, Model, Router } from "../../lib/types";
+import DeleteRouterModal from "../../components/DeleteRouterModal";
 
 function stateBadge(s: string) {
   const map: Record<string, string> = {
@@ -19,6 +20,7 @@ function stateBadge(s: string) {
 
 export default function RouterDetailPage() {
   const params = useParams();
+  const routerNav = useRouter();
   const id = params.id as string;
   const [r, setR] = useState<Router | null>(null);
   const [models, setModels] = useState<Model[]>([]);
@@ -27,6 +29,7 @@ export default function RouterDetailPage() {
   const [busy, setBusy] = useState("");
   const [logs, setLogs] = useState("");
   const [logOn, setLogOn] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
   const logAbort = useRef<AbortController | null>(null);
 
   const [credProvider, setCredProvider] = useState("");
@@ -194,6 +197,12 @@ export default function RouterDetailPage() {
             >
               🔍 Discover Models
             </button>
+            <button
+              className="btn-danger text-xs bg-red-800/80 hover:bg-red-700"
+              onClick={() => setShowDeleteModal(true)}
+            >
+              🗑️ Delete Router
+            </button>
           </div>
         </div>
       </div>
@@ -301,6 +310,14 @@ export default function RouterDetailPage() {
 {logs || "Click 'Attach Stream' to inspect live container logs."}
         </pre>
       </div>
+
+      {showDeleteModal && r && (
+        <DeleteRouterModal
+          router={r}
+          onClose={() => setShowDeleteModal(false)}
+          onDeleted={() => routerNav.push("/routers")}
+        />
+      )}
     </div>
   );
 }

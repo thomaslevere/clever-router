@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -23,6 +25,7 @@ import (
 	"github.com/clever-route/gateway/internal/store"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // slugRe validates that a router slug is safe for use as a container name,
@@ -115,6 +118,11 @@ func (a *API) adminRoot(c *gin.Context) {
 }
 
 func (a *API) registerAdmin(g *gin.RouterGroup) {
+	// Authentication
+	g.POST("/auth/login", a.login)
+	g.POST("/auth/logout", a.logout)
+	g.GET("/auth/me", a.authMe)
+
 	// Router CRUD
 	g.GET("/routers", a.listRouters)
 	g.POST("/routers", a.createRouter)
@@ -151,18 +159,47 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 
 func (a *API) adminAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if a.cfg.IsDev() && c.GetHeader("X-Dev-Bypass") == "1" {
-			c.Set("actor", "dev")
+		// Public login endpoint does not require pre-existing authentication.
+		if c.Request.URL.Path == "/auth/login" {
 			c.Next()
 			return
 		}
-		tok := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
-		if tok == "" || tok != a.cfg.AdminToken {
+		if a.cfg.IsDev() && c.GetHeader("X-Dev-Bypass") == "1" {
+			c.Set("actor", "dev")
+			c.Set("role", "owner")
+			c.Next()
+			return
+		}
+		authHeader := c.GetHeader("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
 			c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized"})
 			return
 		}
-		c.Set("actor", "admin")
-		c.Next()
+		tok := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		if tok == "" {
+			c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized"})
+			return
+		}
+
+		// 1. Direct master token check (CLI/system calls)
+		if tok == a.cfg.AdminToken {
+			c.Set("actor", "admin")
+			c.Set("role", "owner")
+			c.Next()
+			return
+		}
+
+		// 2. User session check via Redis
+		sess, err := a.cache.GetSession(c.Request.Context(), tok)
+		if err == nil && sess != nil {
+			c.Set("actor", sess.Username)
+			c.Set("user_id", sess.UserID)
+			c.Set("role", sess.Role)
+			c.Next()
+			return
+		}
+
+		c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized"})
 	}
 }
 
@@ -589,6 +626,83 @@ func (a *API) systemInfo(c *gin.Context) {
 		"routers_healthy":    healthy,
 		"cellar_configured":  cellarConfigured,
 		"admin_internal_addr": a.cfg.AdminInternalAddr,
+	})
+}
+
+// ----- auth handlers -----
+
+type loginReq struct {
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+func (a *API) login(c *gin.Context) {
+	var req loginReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "username and password are required"})
+		return
+	}
+
+	u, err := a.store.GetUserByUsername(c.Request.Context(), req.Username)
+	if err != nil {
+		c.JSON(401, gin.H{"error": "invalid username or password"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(req.Password)); err != nil {
+		c.JSON(401, gin.H{"error": "invalid username or password"})
+		return
+	}
+
+	// Generate a high-entropy 32-byte session token
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		c.JSON(500, gin.H{"error": "failed to generate session"})
+		return
+	}
+	sessionToken := "cr_sess_" + hex.EncodeToString(tokenBytes)
+
+	sess := &cache.SessionCache{
+		UserID:   u.ID,
+		Username: u.Username,
+		Role:     u.Role,
+	}
+
+	// Store active session in Redis with 7-day TTL
+	if err := a.cache.SetSession(c.Request.Context(), sessionToken, sess, 7*24*time.Hour); err != nil {
+		log.Printf("[api] failed to cache session in redis: %v", err)
+	}
+
+	a.audit(c, "auth.login", "user", u.ID, nil, store.Map{"username": u.Username, "role": u.Role})
+
+	c.JSON(200, gin.H{
+		"token": sessionToken,
+		"user": gin.H{
+			"id":       u.ID,
+			"username": u.Username,
+			"email":    u.Email,
+			"role":     u.Role,
+		},
+	})
+}
+
+func (a *API) logout(c *gin.Context) {
+	authHeader := c.GetHeader("Authorization")
+	tok := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	if tok != "" {
+		_ = a.cache.DelSession(c.Request.Context(), tok)
+	}
+	c.JSON(200, gin.H{"ok": true})
+}
+
+func (a *API) authMe(c *gin.Context) {
+	actor, _ := c.Get("actor")
+	role, _ := c.Get("role")
+	userID, _ := c.Get("user_id")
+	c.JSON(200, gin.H{
+		"username": actor,
+		"role":     role,
+		"user_id":  userID,
 	})
 }
 

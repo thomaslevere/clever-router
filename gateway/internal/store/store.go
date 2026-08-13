@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -38,6 +39,31 @@ func (s *Store) Close() {
 
 func (s *Store) Ping(ctx context.Context) error {
 	return s.Pool.Ping(ctx)
+}
+
+// User is an administrator account for accessing the control plane.
+type User struct {
+	ID           string    `json:"id"`
+	Username     string    `json:"username"`
+	Email        string    `json:"email"`
+	PasswordHash string    `json:"-"`
+	Role         string    `json:"role"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// GetUserByUsername retrieves a user by their username or email (case-insensitive).
+func (s *Store) GetUserByUsername(ctx context.Context, username string) (*User, error) {
+	var u User
+	err := s.Pool.QueryRow(ctx, `
+		SELECT id, COALESCE(username, email), email, password_hash, role, created_at
+		FROM users
+		WHERE LOWER(username) = LOWER($1) OR LOWER(email) = LOWER($1)
+		LIMIT 1`, strings.TrimSpace(username)).
+		Scan(&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.Role, &u.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
 }
 
 // Router is the managed-resource representation of an AI router instance.

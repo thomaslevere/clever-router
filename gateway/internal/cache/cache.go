@@ -91,6 +91,41 @@ func (c *Cache) DelVirtualKey(ctx context.Context, hash string) error {
 	return c.rdb.Del(ctx, "vkey:"+hash).Err()
 }
 
+// ----- admin session cache -----
+
+type SessionCache struct {
+	UserID   string `json:"user_id"`
+	Username string `json:"username"`
+	Role     string `json:"role"`
+}
+
+func (c *Cache) SetSession(ctx context.Context, token string, s *SessionCache, ttl time.Duration) error {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	return c.rdb.Set(ctx, "sess:"+token, b, ttl).Err()
+}
+
+func (c *Cache) GetSession(ctx context.Context, token string) (*SessionCache, error) {
+	v, err := c.rdb.Get(ctx, "sess:"+token).Result()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var s SessionCache
+	if err := json.Unmarshal([]byte(v), &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (c *Cache) DelSession(ctx context.Context, token string) error {
+	return c.rdb.Del(ctx, "sess:"+token).Err()
+}
+
 // ----- rate limiting (atomic fixed-window via Lua) -----
 //
 // M-2 FIX: The previous INCR+EXPIRE pipeline was non-atomic — a crash between

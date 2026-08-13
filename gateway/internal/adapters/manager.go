@@ -156,9 +156,13 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	pidsLimit := lim.PidsLimit
 
 	name := containerPrefix + r.Slug
+	internalPort := nat.Port(fmt.Sprintf("%d/tcp", ad.InternalPort(r)))
 	cfg := &container.Config{
 		Image: r.ImageRef,
 		Env:   ad.Env(r, creds),
+		ExposedPorts: nat.PortSet{
+			internalPort: struct{}{},
+		},
 		Labels: map[string]string{
 			"app":        "clever-route",
 			"router":     r.Slug,
@@ -166,13 +170,12 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 			"managed-by": "clever-route",
 		},
 	}
-	internalPortStr := fmt.Sprintf("%d/tcp", ad.InternalPort(r))
 	host := &container.HostConfig{
 		Binds:         ad.Mounts(r),
 		RestartPolicy: container.RestartPolicy{Name: "unless-stopped"},
 		AutoRemove:    false,
 		PortBindings: nat.PortMap{
-			nat.Port(internalPortStr): []nat.PortBinding{
+			internalPort: []nat.PortBinding{
 				{HostIP: "0.0.0.0", HostPort: ""},
 			},
 		},

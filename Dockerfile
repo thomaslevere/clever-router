@@ -17,9 +17,37 @@ RUN go mod download
 COPY gateway/ ./
 RUN go build -trimpath -ldflags="-s -w" -o /out/gateway ./cmd/server
 
-######## Stage 3: runtime (Node 20 Alpine with bash & docker-cli) ########
-FROM node:20-alpine AS runtime
-RUN apk add --no-cache docker-cli tini ca-certificates bash htop git procps
+######## Stage 3: runtime (Ubuntu latest base image) ########
+FROM ubuntu:latest AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PORT=8080 \
+    ADMIN_INTERNAL_ADDR=127.0.0.1:3000 \
+    APP_ENV=production \
+    HOSTNAME=127.0.0.1 \
+    PATH="/usr/local/bin:${PATH}"
+
+# Install base Ubuntu system tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    wget \
+    tini \
+    bash \
+    procps \
+    iputils-ping \
+    htop \
+    git \
+    netcat-openbsd \
+    xz-utils \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install official Node 20.x runtime directly into /usr/local
+RUN curl -fsSL https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz | tar -xJ -C /usr/local --strip-components=1
+
+# Install official Docker CLI binary directly into /usr/local/bin
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-24.0.7.tgz | tar -xz -C /usr/local/bin --strip-components=1 docker/docker
 
 WORKDIR /app
 # Static Go gateway (single public listener on :8080)
@@ -28,26 +56,23 @@ COPY --from=gateway /out/gateway /app/gateway
 COPY --from=admin /app/admin/.next/standalone /app/admin
 COPY --from=admin /app/admin/.next/static /app/admin/.next/static
 
-# Write entrypoint inline
+# Write fast entrypoint script for Ubuntu container
 RUN printf '%s\n' \
-    '#!/bin/sh' \
+    '#!/bin/bash' \
     'set -e' \
     '(cd /app/admin && PORT=3000 HOSTNAME=127.0.0.1 node server.js) &' \
     'NEXT_PID=$!' \
     'echo "[entrypoint] waiting for Next.js on :3000…"' \
     'MAX_WAIT=30; i=0' \
     'while [ $i -lt $MAX_WAIT ]; do' \
-    '  wget -q --spider http://127.0.0.1:3000/admin 2>/dev/null && break' \
+    '  if nc -z 127.0.0.1 3000 2>/dev/null; then' \
+    '    break' \
+    '  fi' \
     '  sleep 1; i=$((i+1))' \
     'done' \
     '[ $i -lt $MAX_WAIT ] && echo "[entrypoint] Next.js ready" || echo "[entrypoint] warning: Next.js timeout"' \
     'exec /app/gateway' \
     > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
-ENV PORT=8080 \
-    ADMIN_INTERNAL_ADDR=127.0.0.1:3000 \
-    APP_ENV=production \
-    HOSTNAME=127.0.0.1
-
 EXPOSE 8080
-ENTRYPOINT ["/sbin/tini", "--", "/app/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]

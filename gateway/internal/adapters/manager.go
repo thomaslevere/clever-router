@@ -457,6 +457,7 @@ func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapte
 	deadline := time.Now().Add(maxWait)
 	interval := 500 * time.Millisecond
 	const maxInterval = 5 * time.Second
+	probeClient := &http.Client{Timeout: 3 * time.Second}
 
 	for time.Now().Before(deadline) {
 		candidates := m.getCandidates(ctx, containerID, port)
@@ -464,12 +465,16 @@ func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapte
 			url := strings.TrimRight(cand, "/") + ad.HealthPath(r)
 			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 			if err == nil {
-				resp, err := http.DefaultClient.Do(req)
+				resp, err := probeClient.Do(req)
 				if err == nil {
+					status := resp.StatusCode
 					resp.Body.Close()
-					if resp.StatusCode < 500 {
+					log.Printf("[health-check] %s candidate %s -> HTTP %d", r.Slug, cand, status)
+					if status < 500 {
 						return cand, true
 					}
+				} else {
+					log.Printf("[health-check] %s candidate %s -> err: %v", r.Slug, cand, err)
 				}
 			}
 		}

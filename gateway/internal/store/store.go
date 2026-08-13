@@ -315,6 +315,11 @@ func (s *Store) RevokeVirtualKey(ctx context.Context, id string) error {
 	return err
 }
 
+func (s *Store) DeleteVirtualKey(ctx context.Context, id string) error {
+	_, err := s.Pool.Exec(ctx, `DELETE FROM virtual_keys WHERE id=$1`, id)
+	return err
+}
+
 // CheckBudget returns true if the key has remaining budget (or no budget limit).
 // BUG-2 FIX: the proxy now calls this before forwarding to enforce budget_cents.
 func (s *Store) CheckBudget(ctx context.Context, keyID string) (bool, error) {

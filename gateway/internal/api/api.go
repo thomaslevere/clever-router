@@ -181,6 +181,7 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 	g.GET("/keys", a.listKeys)
 	g.POST("/keys", a.createKey)
 	g.POST("/keys/:id/revoke", a.revokeKey)
+	g.DELETE("/keys/:id", a.deleteKey)
 
 	// Audit + system
 	g.GET("/audit", a.listAudit)
@@ -617,6 +618,16 @@ func (a *API) revokeKey(c *gin.Context) {
 		return
 	}
 	a.audit(c, "key.revoke", "virtual_key", c.Param("id"), nil, nil)
+	c.JSON(200, gin.H{"ok": true})
+}
+
+func (a *API) deleteKey(c *gin.Context) {
+	id := c.Param("id")
+	if err := a.store.DeleteVirtualKey(c, id); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	a.audit(c, "key.delete", "virtual_key", id, nil, nil)
 	c.JSON(200, gin.H{"ok": true})
 }
 

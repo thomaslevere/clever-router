@@ -1,16 +1,20 @@
 "use client";
 
 import { useState } from "react";
+import { api } from "../lib/api";
 import type { VirtualKey } from "../lib/types";
 
 export default function KeyDetailModal({
   vkey,
   onClose,
+  onUpdated,
 }: {
   vkey: VirtualKey;
   onClose: () => void;
+  onUpdated?: () => void;
 }) {
   const [copiedId, setCopiedId] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   const budgetPct = vkey.budget_cents
     ? Math.min(100, Math.round((vkey.spent_cents / vkey.budget_cents) * 100))
@@ -146,7 +150,54 @@ export default function KeyDetailModal({
           </div>
         </div>
 
-        <div className="flex justify-end pt-5 border-t border-white/10 mt-5">
+        <div className="flex items-center justify-between pt-5 border-t border-white/10 mt-5">
+          <div>
+            {vkey.status === "active" ? (
+              <button
+                type="button"
+                disabled={busy}
+                className="text-xs text-amber-400 hover:text-amber-300 font-semibold transition"
+                onClick={async () => {
+                  if (confirm(`Revoke key "${vkey.name}"?`)) {
+                    setBusy(true);
+                    try {
+                      await api.post(`/keys/${vkey.id}/revoke`);
+                      if (onUpdated) onUpdated();
+                      onClose();
+                    } catch (e: any) {
+                      alert(e.message || "Failed to revoke key");
+                    } finally {
+                      setBusy(false);
+                    }
+                  }
+                }}
+              >
+                Revoke Key
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={busy}
+                className="text-xs text-red-400 hover:text-red-300 font-semibold transition flex items-center gap-1"
+                onClick={async () => {
+                  if (confirm(`Permanently delete revoked key "${vkey.name}"?`)) {
+                    setBusy(true);
+                    try {
+                      await api.del(`/keys/${vkey.id}`);
+                      if (onUpdated) onUpdated();
+                      onClose();
+                    } catch (e: any) {
+                      alert(e.message || "Failed to delete key");
+                    } finally {
+                      setBusy(false);
+                    }
+                  }
+                }}
+              >
+                <span>🗑 Delete Revoked Key</span>
+              </button>
+            )}
+          </div>
           <button className="btn-secondary text-xs px-4 py-2" onClick={onClose}>
             Close Inspection Modal
           </button>

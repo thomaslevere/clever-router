@@ -214,9 +214,9 @@ export default function KeysPage() {
                     >
                       🔍 Inspect
                     </button>
-                    {k.status === "active" && (
+                    {k.status === "active" ? (
                       <button
-                        className="text-xs text-red-500 hover:text-red-700 dark:hover:text-red-400 font-semibold transition"
+                        className="text-xs text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300 font-semibold transition"
                         onClick={async () => {
                           if (confirm(`Revoke key "${k.name}"?`)) {
                             await api.post(`/keys/${k.id}/revoke`);
@@ -225,6 +225,18 @@ export default function KeysPage() {
                         }}
                       >
                         Revoke
+                      </button>
+                    ) : (
+                      <button
+                        className="text-xs text-red-500 hover:text-red-700 dark:hover:text-red-400 font-semibold transition inline-flex items-center gap-1"
+                        onClick={async () => {
+                          if (confirm(`Permanently delete revoked key "${k.name}"?`)) {
+                            await api.del(`/keys/${k.id}`);
+                            load();
+                          }
+                        }}
+                      >
+                        <span>🗑 Delete</span>
                       </button>
                     )}
                   </div>
@@ -248,6 +260,7 @@ export default function KeysPage() {
         <KeyDetailModal
           vkey={selectedKey}
           onClose={() => setSelectedKey(null)}
+          onUpdated={() => load()}
         />
       )}
     </div>

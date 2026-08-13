@@ -202,39 +202,35 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 		return fmt.Errorf("start container: %w", err)
 	}
 
-	addr, err := m.resolveAddr(ctx, created.ID, ad.InternalPort(r))
-	if err != nil {
-		return fmt.Errorf("resolve address: %w", err)
-	}
-	panel := strings.TrimRight(addr, "/") + ad.NativePanelPath(r)
-
-	if err := m.store.UpdateRouterState(ctx, r.ID, "starting", addr, created.ID, panel, "unknown"); err != nil {
-		return err
-	}
-
-	// GAP-8 FIX: use deadline + exponential backoff instead of fixed-count sleep.
-	if ok := m.waitForHealthy(ctx, r, ad, addr, 90*time.Second); !ok {
-		_ = m.store.UpdateRouterState(ctx, r.ID, "unhealthy", addr, created.ID, panel, "unhealthy")
+	workingAddr, ok := m.waitForHealthy(ctx, r, ad, created.ID, ad.InternalPort(r), 90*time.Second)
+	if !ok {
+		fallbackAddr := "http://127.0.0.1"
+		if cands := m.getCandidates(ctx, created.ID, ad.InternalPort(r)); len(cands) > 0 {
+			fallbackAddr = cands[0]
+		}
+		panel := strings.TrimRight(fallbackAddr, "/") + ad.NativePanelPath(r)
+		_ = m.store.UpdateRouterState(ctx, r.ID, "unhealthy", fallbackAddr, created.ID, panel, "unhealthy")
 		_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
 		return fmt.Errorf("router %s started but did not pass health check within 90s", r.Slug)
 	}
 
-	if err := m.store.UpdateRouterState(ctx, r.ID, "running", addr, created.ID, panel, "healthy"); err != nil {
+	panel := strings.TrimRight(workingAddr, "/") + ad.NativePanelPath(r)
+	if err := m.store.UpdateRouterState(ctx, r.ID, "running", workingAddr, created.ID, panel, "healthy"); err != nil {
 		return err
 	}
-	if err := m.cache.SetRoute(ctx, r.Slug, addr); err != nil {
+	if err := m.cache.SetRoute(ctx, r.Slug, workingAddr); err != nil {
 		return err
 	}
-	m.table.Set(r.Slug, addr)
+	m.table.Set(r.Slug, workingAddr)
 
 	// Best-effort discovery; never block traffic on it.
-	_ = m.DiscoverModels(ctx, r, ad, addr)
+	_ = m.DiscoverModels(ctx, r, ad, workingAddr)
 	_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
-	logger.Info("router", r.Slug, fmt.Sprintf("Router container started and healthy at %s", addr), store.Map{
+	logger.Info("router", r.Slug, fmt.Sprintf("Router container started and healthy at %s", workingAddr), store.Map{
 		"slug":         r.Slug,
 		"adapter":      r.AdapterType,
 		"container_id": created.ID[:12],
-		"target_addr":  addr,
+		"target_addr":  workingAddr,
 	})
 	return nil
 }
@@ -374,11 +370,10 @@ func hostPortFromURL(u string) string {
 	return s
 }
 
-// resolveAddr probes published host ports (on gateway IP/127.0.0.1) and container IPs, returning the first reachable address.
-func (m *Manager) resolveAddr(ctx context.Context, containerID string, port int) (string, error) {
+func (m *Manager) getCandidates(ctx context.Context, containerID string, port int) []string {
 	insp, err := m.docker.ContainerInspect(ctx, containerID)
 	if err != nil {
-		return "", err
+		return nil
 	}
 
 	gatewayIP := "172.17.0.1"
@@ -393,20 +388,7 @@ func (m *Manager) resolveAddr(ctx context.Context, containerID string, port int)
 	internalPort := nat.Port(fmt.Sprintf("%d/tcp", port))
 	var candidates []string
 
-	// 1. Published host ports (mapped to gateway IP / 127.0.0.1)
-	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
-		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok && len(bindings) > 0 {
-			for _, b := range bindings {
-				if b.HostPort != "" {
-					candidates = append(candidates, fmt.Sprintf("http://%s:%s", gatewayIP, b.HostPort))
-					candidates = append(candidates, fmt.Sprintf("http://127.0.0.1:%s", b.HostPort))
-					candidates = append(candidates, fmt.Sprintf("http://172.18.0.1:%s", b.HostPort))
-				}
-			}
-		}
-	}
-
-	// 2. Direct container IPs
+	// 1. Direct container IPs (preferred for bridge container-to-container routing)
 	if insp.NetworkSettings != nil {
 		if n, ok := insp.NetworkSettings.Networks["bridge"]; ok && n.IPAddress != "" {
 			candidates = append(candidates, fmt.Sprintf("http://%s:%d", n.IPAddress, port))
@@ -421,18 +403,33 @@ func (m *Manager) resolveAddr(ctx context.Context, containerID string, port int)
 		}
 	}
 
-	// Dynamic TCP reachability probe: return first address accepting TCP connections
-	for _, cand := range candidates {
+	// 2. Published host ports
+	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
+		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok && len(bindings) > 0 {
+			for _, b := range bindings {
+				if b.HostPort != "" {
+					candidates = append(candidates, fmt.Sprintf("http://127.0.0.1:%s", b.HostPort))
+					candidates = append(candidates, fmt.Sprintf("http://%s:%s", gatewayIP, b.HostPort))
+				}
+			}
+		}
+	}
+
+	return candidates
+}
+
+func (m *Manager) resolveAddr(ctx context.Context, containerID string, port int) (string, error) {
+	cands := m.getCandidates(ctx, containerID, port)
+	for _, cand := range cands {
 		hp := hostPortFromURL(cand)
-		conn, err := net.DialTimeout("tcp", hp, 500*time.Millisecond)
+		conn, err := net.DialTimeout("tcp", hp, 300*time.Millisecond)
 		if err == nil {
 			_ = conn.Close()
 			return cand, nil
 		}
 	}
-
-	if len(candidates) > 0 {
-		return candidates[0], nil
+	if len(cands) > 0 {
+		return cands[0], nil
 	}
 	return "", fmt.Errorf("no address resolved for container %s", containerID)
 }
@@ -448,24 +445,24 @@ func networkNames(ns *dockertypes.NetworkSettings) []string {
 	return names
 }
 
-// waitForHealthy probes the router's health endpoint with exponential backoff
-// until it returns 2xx or the deadline is exceeded.
-// GAP-8 FIX: replaced fixed tries×interval loop (up to 60s of uniform sleep)
-// with a deadline-based loop starting at 500ms and doubling up to 5s intervals.
-func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapter, addr string, maxWait time.Duration) bool {
-	url := strings.TrimRight(addr, "/") + ad.HealthPath(r)
+// waitForHealthy probes the router's health endpoint across candidate addresses with exponential backoff.
+func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapter, containerID string, port int, maxWait time.Duration) (string, bool) {
 	deadline := time.Now().Add(maxWait)
 	interval := 500 * time.Millisecond
 	const maxInterval = 5 * time.Second
 
 	for time.Now().Before(deadline) {
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err == nil {
-			resp, err := http.DefaultClient.Do(req)
+		candidates := m.getCandidates(ctx, containerID, port)
+		for _, cand := range candidates {
+			url := strings.TrimRight(cand, "/") + ad.HealthPath(r)
+			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 			if err == nil {
-				resp.Body.Close()
-				if resp.StatusCode < 500 {
-					return true
+				resp, err := http.DefaultClient.Do(req)
+				if err == nil {
+					resp.Body.Close()
+					if resp.StatusCode < 500 {
+						return cand, true
+					}
 				}
 			}
 		}
@@ -479,14 +476,14 @@ func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapte
 		}
 		select {
 		case <-ctx.Done():
-			return false
+			return "", false
 		case <-time.After(sleep):
 		}
 		if interval < maxInterval {
 			interval *= 2
 		}
 	}
-	return false
+	return "", false
 }
 
 func (m *Manager) loadCreds(ctx context.Context, r *store.Router) (map[string]string, error) {

@@ -162,8 +162,12 @@ func firstNonEmpty(vals ...string) string {
 }
 
 func getenv(key, def string) string {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		return v
+	if v, ok := os.LookupEnv(key); ok {
+		v = strings.TrimSpace(v)
+		v = strings.Trim(v, `"'`)
+		if v != "" {
+			return v
+		}
 	}
 	return def
 }

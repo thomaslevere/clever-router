@@ -34,6 +34,14 @@ export default function RouterDetailPage() {
 
   const [credProvider, setCredProvider] = useState("");
   const [credKey, setCredKey] = useState("");
+  const [panelUrl, setPanelUrl] = useState("");
+  const [copiedUrl, setCopiedUrl] = useState(false);
+
+  useEffect(() => {
+    if (r) {
+      setPanelUrl(getRouterPanelUrl(r));
+    }
+  }, [r]);
 
   const load = useCallback(async () => {
     try {
@@ -154,16 +162,36 @@ export default function RouterDetailPage() {
                   Target internal: <code className="font-mono text-slate-700 dark:text-slate-300">{r.target_addr}</code>
                 </p>
                 {r.native_panel_url && (
-                  <div className="flex items-center gap-2 flex-wrap pt-0.5">
+                  <div className="flex items-center gap-2 flex-wrap pt-1">
                     <span className="font-medium text-slate-600 dark:text-slate-300">Native Dashboard:</span>
                     <a
                       className="text-brand hover:underline font-semibold font-mono text-xs inline-flex items-center gap-1.5 bg-brand/10 dark:bg-brand/20 text-brand px-2.5 py-1 rounded-md transition hover:bg-brand/20 dark:hover:bg-brand/30"
                       target="_blank"
                       rel="noreferrer"
-                      href={getRouterPanelUrl(r)}
+                      href={panelUrl || getRouterPanelUrl(r)}
+                      onClick={(e) => {
+                        const url = getRouterPanelUrl(r);
+                        if (url && url !== e.currentTarget.href) {
+                          e.currentTarget.href = url;
+                        }
+                      }}
                     >
                       <span>Open Native Panel ↗</span>
                     </a>
+                    <button
+                      type="button"
+                      className="text-[11px] px-2 py-0.5 rounded border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5 text-slate-600 dark:text-slate-400 font-mono transition"
+                      onClick={() => {
+                        const url = getRouterPanelUrl(r);
+                        if (url) {
+                          navigator.clipboard.writeText(url);
+                          setCopiedUrl(true);
+                          setTimeout(() => setCopiedUrl(false), 2000);
+                        }
+                      }}
+                    >
+                      {copiedUrl ? "✓ Copied!" : "📋 Copy URL"}
+                    </button>
                   </div>
                 )}
               </div>

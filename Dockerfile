@@ -17,7 +17,7 @@ RUN go mod download
 COPY gateway/ ./
 RUN go build -trimpath -ldflags="-s -w" -o /out/gateway ./cmd/server
 
-######## Stage 3: runtime (Ubuntu latest base image) ########
+######## Stage 3: runtime (Ubuntu latest base image - XL 8 CPU / 16 GiB RAM optimized) ########
 FROM ubuntu:latest AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -25,6 +25,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ADMIN_INTERNAL_ADDR=127.0.0.1:3000 \
     APP_ENV=production \
     HOSTNAME=127.0.0.1 \
+    NODE_OPTIONS="--max-old-space-size=12288" \
+    GOMEMLIMIT="14GiB" \
     PATH="/usr/local/bin:${PATH}"
 
 # Install base Ubuntu system tools (apt, apt-get, dpkg, bash, tini, etc.)

@@ -17,8 +17,8 @@ RUN go mod download
 COPY gateway/ ./
 RUN go build -trimpath -ldflags="-s -w" -o /out/gateway ./cmd/server
 
-######## Stage 3: runtime (Ubuntu latest base image) ########
-FROM ubuntu:latest AS runtime
+######## Stage 3: runtime (Ubuntu 22.04 LTS base image) ########
+FROM ubuntu:22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PORT=8080 \

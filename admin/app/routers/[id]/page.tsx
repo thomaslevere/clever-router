@@ -123,7 +123,7 @@ export default function RouterDetailPage() {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-2 text-sm text-gray-400">
-        <Link href="/admin/routers" className="hover:text-gray-200">
+        <Link href="/routers" className="hover:text-gray-200">
           Routers
         </Link>
         <span>/</span>

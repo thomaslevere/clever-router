@@ -17,7 +17,7 @@ function stateBadge(s: string) {
 export default function RouterCard({ r }: { r: Router }) {
   const healthy = r.health_status === "healthy";
   return (
-    <Link href={`/admin/routers/${r.id}`} className="card block hover:border-brand/50">
+    <Link href={`/routers/${r.id}`} className="card block hover:border-brand/50">
       <div className="flex items-start justify-between">
         <div>
           <div className="flex items-center gap-2">

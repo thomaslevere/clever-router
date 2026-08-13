@@ -64,3 +64,24 @@ func TestHealthzOK(t *testing.T) {
 		t.Fatalf("/healthz should be registered, got 404")
 	}
 }
+
+func TestSingleJSONResponse(t *testing.T) {
+	a := newTestAPI(t)
+	r := gin.New()
+	r.Use(gin.Recovery())
+	a.Register(r)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/routers", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	// Verify the body is valid single JSON, not duplicated JSON
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	expected := `{"error":"unauthorized"}`
+	if w.Body.String() != expected {
+		t.Fatalf("expected exact single body %q, got %q", expected, w.Body.String())
+	}
+}
+

@@ -6,10 +6,10 @@ import { useEffect, useState } from "react";
 import { clearToken, getToken, setToken } from "../lib/api";
 
 const navItems = [
-  { href: "/admin", label: "Dashboard" },
-  { href: "/admin/routers", label: "Routers" },
-  { href: "/admin/keys", label: "Virtual Keys" },
-  { href: "/admin/audit", label: "Audit Log" },
+  { href: "/", label: "Dashboard" },
+  { href: "/routers", label: "Routers" },
+  { href: "/keys", label: "Virtual Keys" },
+  { href: "/audit", label: "Audit Log" },
 ];
 
 export default function Shell({ children }: { children: React.ReactNode }) {
@@ -95,7 +95,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen">
       <header className="sticky top-0 z-20 border-b border-white/10 bg-[#0b0f17]/80 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center gap-6 px-6 py-3">
-          <Link href="/admin" className="flex items-center gap-2 font-semibold">
+          <Link href="/" className="flex items-center gap-2 font-semibold">
             <span className="grid h-7 w-7 place-items-center rounded-lg bg-brand text-white text-xs font-bold">
               CR
             </span>
@@ -104,7 +104,8 @@ export default function Shell({ children }: { children: React.ReactNode }) {
           <nav className="flex items-center gap-1 text-sm">
             {navItems.map((n) => {
               const active =
-                pathname === n.href || pathname.startsWith(n.href + "/");
+                pathname === n.href ||
+                (n.href !== "/" && pathname.startsWith(n.href));
               return (
                 <Link
                   key={n.href}

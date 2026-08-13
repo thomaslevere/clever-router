@@ -28,8 +28,22 @@ COPY --from=gateway /out/gateway /app/gateway
 COPY --from=admin /app/admin/.next/standalone /app/admin
 COPY --from=admin /app/admin/.next/static /app/admin/.next/static
 
-COPY deploy/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
+# Write the entrypoint inline — avoids .dockerignore exclusions and keeps the
+# runtime logic co-located with the Dockerfile that defines the image.
+RUN printf '%s\n' \
+    '#!/bin/sh' \
+    'set -e' \
+    '(cd /app/admin && PORT=3000 HOSTNAME=127.0.0.1 node server.js) &' \
+    'NEXT_PID=$!' \
+    'echo "[entrypoint] waiting for Next.js on :3000…"' \
+    'MAX_WAIT=30; i=0' \
+    'while [ $i -lt $MAX_WAIT ]; do' \
+    '  wget -q --spider http://127.0.0.1:3000/admin 2>/dev/null && break' \
+    '  sleep 1; i=$((i+1))' \
+    'done' \
+    '[ $i -lt $MAX_WAIT ] && echo "[entrypoint] Next.js ready" || echo "[entrypoint] warning: Next.js timeout"' \
+    'exec /app/gateway' \
+    > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # Clever Cloud exposes one HTTP port (default 8080). The gateway owns it; the
 # admin UI is served behind /admin/* via the gateway's reverse proxy.

@@ -112,7 +112,8 @@ func (a *API) Register(r *gin.Engine) {
 	a.rest = rest
 
 	// Namespaced AI proxy: /{slug}/v1/... and /{slug}/{native}/...
-	p := proxy.New(a.table, keys.NewAuth(a.store, a.cache), a.store)
+	p := proxy.New(a.table, keys.NewAuth(a.store, a.cache), a.store, a.cache, a.cfg)
+	r.Any("/:slug", p.Handle)
 	r.Any("/:slug/*path", p.Handle)
 }
 

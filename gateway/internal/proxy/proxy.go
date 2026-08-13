@@ -8,9 +8,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	"github.com/clever-route/gateway/internal/cache"
+	"github.com/clever-route/gateway/internal/config"
 	"github.com/clever-route/gateway/internal/keys"
 	"github.com/clever-route/gateway/internal/logger"
 	"github.com/clever-route/gateway/internal/router"
@@ -18,21 +21,22 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Proxy is the namespaced AI request path. It authenticates a virtual key,
-// resolves the router target from the hot routing table, forwards the request
-// to the sibling container, and streams the response back while a lightweight
-// byte scanner captures token usage for billing/quota — without full JSON
-// deserialization of every chunk.
+// Proxy is the namespaced AI and router proxy path. It authenticates requests
+// via virtual key, admin token, or admin session, resolves the router target
+// from the hot routing table, forwards the request to the sibling container,
+// and streams the response back while capturing usage for AI completions.
 type Proxy struct {
 	table  *router.Table
 	auth   *keys.Auth
 	store  *store.Store
+	cache  *cache.Cache
+	cfg    *config.Config
 	client *http.Client
 }
 
-func New(t *router.Table, a *keys.Auth, st *store.Store) *Proxy {
+func New(t *router.Table, a *keys.Auth, st *store.Store, c *cache.Cache, cfg *config.Config) *Proxy {
 	return &Proxy{
-		table: t, auth: a, store: st,
+		table: t, auth: a, store: st, cache: c, cfg: cfg,
 		client: &http.Client{
 			Timeout: 0, // streaming must not be cut by an overall timeout
 			Transport: &http.Transport{
@@ -56,53 +60,111 @@ type proxyError struct {
 
 func (p *Proxy) Handle(c *gin.Context) {
 	slug := c.Param("slug")
+	path := c.Param("path")
+
 	target, ok := p.table.Lookup(slug)
+	targetSlug := slug
+	upstreamPath := path
+
+	// Fallback routing for root-relative assets and sub-requests (e.g. /_next/*, /api/*, /favicon.ico)
+	if !ok {
+		fallbackSlug, fallbackTarget := p.findFallbackRouter(c)
+		if fallbackTarget != "" {
+			targetSlug = fallbackSlug
+			target = fallbackTarget
+			upstreamPath = c.Request.URL.Path
+			ok = true
+		}
+	}
+
 	if !ok {
 		fail(c, http.StatusBadGateway, "router '%s' is not serving", slug)
 		return
 	}
 
-	ki, err := p.auth.Authenticate(c.Request.Context(), c.GetHeader("Authorization"))
-	if err != nil {
-		switch err {
-		case keys.ErrRateLimited:
-			fail(c, 429, "rate limit exceeded")
-		case keys.ErrRevoked:
-			fail(c, 401, "api key revoked")
-		default:
-			fail(c, 401, "invalid or missing api key")
+	token := p.extractToken(c)
+
+	// If root of the router is accessed without subpath (e.g. /omniroute-live or /omniroute-live/)
+	if (path == "" || path == "/") && targetSlug == slug {
+		redirectURL := "/" + targetSlug + "/dashboard"
+		if token != "" {
+			redirectURL += "?token=" + url.QueryEscape(token)
 		}
+		c.Redirect(http.StatusTemporaryRedirect, redirectURL)
 		return
 	}
 
-	// M-1 FIX: AllowRouter was called twice. Single authoritative check here.
-	if !keys.AllowRouter(ki.RouterAllow, slug) {
-		fail(c, 403, "key not allowed for router '%s'", slug)
-		return
-	}
-	if err := p.auth.CheckRate(c.Request.Context(), ki.ID, ki.RateLimitRPM); err != nil {
-		fail(c, 429, "rate limit exceeded")
-		return
+	isAdmin := false
+	var ki *keys.KeyInfo
+
+	if p.cfg != nil && p.cfg.IsDev() && c.GetHeader("X-Dev-Bypass") == "1" {
+		isAdmin = true
 	}
 
-	// BUG-2 FIX: enforce budget before forwarding the request.
-	// BudgetCents == 0 means unlimited.
-	if ki.BudgetCents > 0 {
-		ok, err := p.store.CheckBudget(c.Request.Context(), ki.ID)
-		if err == nil && !ok {
-			fail(c, 403, "budget exhausted for this key")
+	if !isAdmin && p.cfg != nil && p.cfg.AdminToken != "" && token != "" && token == p.cfg.AdminToken {
+		isAdmin = true
+	}
+
+	if !isAdmin && p.cache != nil && token != "" {
+		if sess, err := p.cache.GetSession(c.Request.Context(), token); err == nil && sess != nil {
+			isAdmin = true
+		}
+	}
+
+	if !isAdmin {
+		if token == "" {
+			fail(c, 401, "invalid or missing api key")
+			return
+		}
+		var err error
+		ki, err = p.auth.Authenticate(c.Request.Context(), token)
+		if err != nil {
+			switch err {
+			case keys.ErrRateLimited:
+				fail(c, 429, "rate limit exceeded")
+			case keys.ErrRevoked:
+				fail(c, 401, "api key revoked")
+			default:
+				fail(c, 401, "invalid or missing api key")
+			}
+			return
+		}
+
+		if !keys.AllowRouter(ki.RouterAllow, targetSlug) {
+			fail(c, 403, "key not allowed for router '%s'", targetSlug)
+			return
+		}
+		if err := p.auth.CheckRate(c.Request.Context(), ki.ID, ki.RateLimitRPM); err != nil {
+			fail(c, 429, "rate limit exceeded")
 			return
 		}
 	}
 
-	body, _ := io.ReadAll(c.Request.Body)
-	model, isStream := extractModel(body)
-	if model != "" && !keys.AllowModel(ki.ModelAllow, model) {
-		fail(c, 403, "model '%s' not allowed for this key", model)
-		return
+	// Set browser session cookies on valid token for subsequent Next.js asset/chunk requests
+	if token != "" {
+		c.SetCookie("cr_router_auth", token, 86400*7, "/", "", false, false)
+		c.SetCookie("cr_active_router", targetSlug, 86400*7, "/", "", false, false)
 	}
 
-	upURL := strings.TrimRight(target, "/") + c.Param("path")
+	body, _ := io.ReadAll(c.Request.Body)
+	model, isStream := extractModel(body)
+
+	// Check model allowlist and budget for virtual keys
+	if ki != nil {
+		if model != "" && !keys.AllowModel(ki.ModelAllow, model) {
+			fail(c, 403, "model '%s' not allowed for this key", model)
+			return
+		}
+		if ki.BudgetCents > 0 {
+			ok, err := p.store.CheckBudget(c.Request.Context(), ki.ID)
+			if err == nil && !ok {
+				fail(c, 403, "budget exhausted for this key")
+				return
+			}
+		}
+	}
+
+	upURL := strings.TrimRight(target, "/") + upstreamPath
 	if c.Request.URL.RawQuery != "" {
 		upURL += "?" + c.Request.URL.RawQuery
 	}
@@ -130,7 +192,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 			c.Writer.Header().Add(k, v)
 		}
 	}
-	c.Writer.Header().Set("X-CleverRoute-Router", slug)
+	c.Writer.Header().Set("X-CleverRoute-Router", targetSlug)
 	if model != "" {
 		c.Writer.Header().Set("X-CleverRoute-Model", model)
 	}
@@ -164,8 +226,70 @@ func (p *Proxy) Handle(c *gin.Context) {
 		}
 	}
 
-	// Record usage asynchronously so the client is never blocked on the DB.
-	go p.recordUsage(ki.ID, slug, model, resp.StatusCode, sc)
+	if ki != nil && model != "" {
+		// Record usage asynchronously so the client is never blocked on the DB.
+		go p.recordUsage(ki.ID, targetSlug, model, resp.StatusCode, sc)
+	}
+}
+
+func (p *Proxy) findFallbackRouter(c *gin.Context) (string, string) {
+	// 1. Check cr_active_router cookie
+	if cookie, err := c.Cookie("cr_active_router"); err == nil && cookie != "" {
+		if t, ok := p.table.Lookup(cookie); ok {
+			return cookie, t
+		}
+	}
+
+	// 2. Check Referer header
+	referer := c.GetHeader("Referer")
+	if referer != "" {
+		snap := p.table.Snapshot()
+		for s, t := range snap {
+			if strings.Contains(referer, "/"+s+"/") || strings.Contains(referer, "/"+s+"?") || strings.HasSuffix(referer, "/"+s) {
+				return s, t
+			}
+		}
+	}
+
+	// 3. If exactly 1 router is active in the table, fallback to it
+	snap := p.table.Snapshot()
+	if len(snap) == 1 {
+		for s, t := range snap {
+			return s, t
+		}
+	}
+
+	return "", ""
+}
+
+func (p *Proxy) extractToken(c *gin.Context) string {
+	// 1. Authorization header: "Bearer <token>" or plain "<token>"
+	authHeader := c.GetHeader("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		if t := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer ")); t != "" {
+			return t
+		}
+	} else if authHeader != "" {
+		return strings.TrimSpace(authHeader)
+	}
+
+	// 2. Query param: ?token=... or ?key=... or ?api_key=...
+	if t := strings.TrimSpace(c.Query("token")); t != "" {
+		return t
+	}
+	if t := strings.TrimSpace(c.Query("key")); t != "" {
+		return t
+	}
+	if t := strings.TrimSpace(c.Query("api_key")); t != "" {
+		return t
+	}
+
+	// 3. Cookie: cr_router_auth
+	if cookie, err := c.Cookie("cr_router_auth"); err == nil && strings.TrimSpace(cookie) != "" {
+		return strings.TrimSpace(cookie)
+	}
+
+	return ""
 }
 
 func (p *Proxy) recordUsage(keyID, slug, model string, status int, sc *usageScanner) {
@@ -291,12 +415,6 @@ func (s *usageScanner) parse() {
 }
 
 // extractJSONObject locates the JSON object immediately following marker in buf.
-//
-// BUG-3 FIX: The previous implementation toggled inStr on every '"' byte,
-// which broke on escaped quotes (e.g. `\"`) inside string values — causing
-// the brace-depth counter to miscount and return a truncated or nil object.
-// This version correctly tracks escape state: a '"' preceded by an odd number
-// of backslashes does not change the string boundary.
 func extractJSONObject(buf, marker []byte) []byte {
 	idx := bytes.Index(buf, marker)
 	if idx < 0 {
@@ -317,8 +435,6 @@ func extractJSONObject(buf, marker []byte) []byte {
 		b := buf[i]
 		switch {
 		case escape:
-			// Previous character was a backslash — this character is always
-			// a literal (escaped), never a string boundary or brace.
 			escape = false
 		case inStr:
 			if b == '\\' {

@@ -215,13 +215,21 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 		if cands := m.getCandidates(ctx, created.ID, ad.InternalPort(r)); len(cands) > 0 {
 			fallbackAddr = cands[0]
 		}
-		panel := strings.TrimRight(fallbackAddr, "/") + ad.NativePanelPath(r)
+		endpoint := r.EndpointPath
+		if endpoint == "" {
+			endpoint = "/" + r.Slug
+		}
+		panel := endpoint + ad.NativePanelPath(r)
 		_ = m.store.UpdateRouterState(ctx, r.ID, "unhealthy", fallbackAddr, created.ID, panel, "unhealthy")
 		_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
 		return fmt.Errorf("router %s started but did not pass health check within 90s", r.Slug)
 	}
 
-	panel := strings.TrimRight(workingAddr, "/") + ad.NativePanelPath(r)
+	endpoint := r.EndpointPath
+	if endpoint == "" {
+		endpoint = "/" + r.Slug
+	}
+	panel := endpoint + ad.NativePanelPath(r)
 	if err := m.store.UpdateRouterState(ctx, r.ID, "running", workingAddr, created.ID, panel, "healthy"); err != nil {
 		return err
 	}

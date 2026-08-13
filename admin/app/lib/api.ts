@@ -114,3 +114,32 @@ export const api = {
     clearToken();
   },
 };
+
+export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: string; native_panel_url?: string }): string {
+  if (typeof window === "undefined") return "";
+  const token = getToken();
+  let path = router.native_panel_url || "";
+
+  if (path.startsWith("http://") || path.startsWith("https://")) {
+    try {
+      const u = new URL(path);
+      path = u.pathname;
+    } catch {
+      path = "/dashboard";
+    }
+  }
+
+  const endpoint = router.endpoint_path || `/${router.slug || ""}`;
+  if (!path || path === "/" || path === "/dashboard") {
+    path = `${endpoint}/dashboard`;
+  } else if (!path.startsWith(endpoint)) {
+    path = `${endpoint}${path.startsWith("/") ? path : `/${path}`}`;
+  }
+
+  const base = window.location.origin;
+  const url = new URL(path, base);
+  if (token) {
+    url.searchParams.set("token", token);
+  }
+  return url.toString();
+}

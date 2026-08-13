@@ -117,170 +117,188 @@ export default function RouterDetailPage() {
 
   useEffect(() => () => logAbort.current?.abort(), []);
 
-  if (err && !r) return <p className="text-sm text-red-400">{err}</p>;
-  if (!r) return <p className="text-sm text-gray-400">Loading…</p>;
+  if (err && !r) return <div className="card border-red-500/30 text-xs text-red-500 bg-red-500/10 p-4">{err}</div>;
+  if (!r) return <p className="text-xs text-slate-500">Loading router details…</p>;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-2 text-sm text-gray-400">
-        <Link href="/routers" className="hover:text-gray-200">
+      <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+        <Link href="/routers" className="hover:text-brand font-medium transition">
           Routers
         </Link>
         <span>/</span>
-        <span className="text-gray-200">{r.slug}</span>
+        <span className="text-slate-800 dark:text-slate-200 font-semibold">{r.slug}</span>
       </div>
 
-      <div className="card">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+      {/* Main Header Card */}
+      <div className="card shadow-lg p-6 border border-black/10 dark:border-white/10">
+        <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-lg font-semibold text-white">{r.name}</h1>
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100">{r.name}</h1>
               <span className={stateBadge(r.runtime_state)}>{r.runtime_state}</span>
               {r.health_status === "healthy" && (
-                <span className="badge-green">healthy</span>
+                <span className="badge badge-green">● healthy</span>
               )}
             </div>
-            <p className="mt-1 text-xs text-gray-400">
-              <code>{r.endpoint_path}/v1/...</code> · {r.adapter_type} ·{" "}
+            <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">
+              <code className="text-brand font-medium">{r.endpoint_path}/v1/…</code> · {r.adapter_type} ·{" "}
               {r.image_ref}
             </p>
             {r.target_addr && (
-              <p className="mt-1 text-xs text-gray-500">
-                target: <code>{r.target_addr}</code>
+              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                Target internal: <code className="font-mono text-slate-700 dark:text-slate-300">{r.target_addr}</code>
                 {r.native_panel_url && (
                   <>
                     {" · "}
                     <a
-                      className="text-brand hover:underline"
+                      className="text-brand hover:underline font-medium"
                       target="_blank"
                       rel="noreferrer"
                       href={r.native_panel_url}
                     >
-                      Open native panel ↗
+                      Open Native Panel ↗
                     </a>
                   </>
                 )}
               </p>
             )}
           </div>
+
           <div className="flex flex-wrap gap-2">
             <button
-              className="btn-primary"
+              className="btn-primary text-xs shadow-sm"
               disabled={busy === "start"}
               onClick={() => act("start", `/routers/${id}/start`)}
             >
-              {busy === "start" ? "Starting…" : "Start"}
+              {busy === "start" ? "Starting…" : "▶ Start"}
             </button>
             <button
-              className="btn-ghost"
+              className="btn-secondary text-xs"
               disabled={busy === "restart"}
               onClick={() => act("restart", `/routers/${id}/restart`)}
             >
-              Restart
+              🔄 Restart
             </button>
             <button
-              className="btn-danger"
+              className="btn-danger text-xs"
               disabled={busy === "stop"}
               onClick={() => act("stop", `/routers/${id}/stop`)}
             >
-              Stop
+              ⏹ Stop
             </button>
             <button
-              className="btn-ghost"
+              className="btn-ghost text-xs"
               disabled={busy === "discover"}
               onClick={() => act("discover", `/routers/${id}/discover`)}
             >
-              Discover models
+              🔍 Discover Models
             </button>
           </div>
         </div>
       </div>
 
+      {/* Grid: Credentials + Discovered Models */}
       <div className="grid gap-6 md:grid-cols-2">
-        <div className="card">
-          <h2 className="text-sm font-semibold text-white">Provider credentials</h2>
-          <p className="mt-1 text-xs text-gray-500">
-            Encrypted at rest (AES-256-GCM). Write-only after save.
+        {/* Credentials */}
+        <div className="card shadow-md p-5 border border-black/10 dark:border-white/10">
+          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+            <span>🔐</span>
+            <span>Provider Credentials</span>
+          </h2>
+          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+            Encrypted with AES-256-GCM envelope encryption. Write-only for security.
           </p>
-          <ul className="mt-3 space-y-1">
+
+          <ul className="mt-4 space-y-1.5">
             {creds.length === 0 && (
-              <li className="text-xs text-gray-500">None configured.</li>
+              <li className="text-xs text-slate-400 italic">No provider credentials saved yet.</li>
             )}
             {creds.map((c) => (
               <li
                 key={c.id}
-                className="flex items-center justify-between rounded-lg bg-black/20 px-3 py-2 text-sm"
+                className="flex items-center justify-between rounded-lg bg-black/5 dark:bg-white/5 px-3 py-2 text-xs border border-black/5 dark:border-white/5"
               >
-                <span className="text-gray-200">{c.provider}</span>
+                <span className="font-semibold text-slate-800 dark:text-slate-200 uppercase tracking-wider">{c.provider}</span>
                 <button
-                  className="text-xs text-red-400 hover:underline"
+                  className="text-xs text-red-500 hover:text-red-700 dark:hover:text-red-400 font-medium"
                   onClick={async () => {
                     if (!confirm(`Remove credential for "${c.provider}"?`)) return;
                     await api.del(`/routers/${id}/credentials/${encodeURIComponent(c.provider)}`);
                     load();
                   }}
                 >
-                  remove
+                  Remove
                 </button>
               </li>
             ))}
           </ul>
-          <form onSubmit={saveCred} className="mt-3 space-y-2">
+
+          <form onSubmit={saveCred} className="mt-4 space-y-2 pt-3 border-t border-black/10 dark:border-white/10">
             <input
-              className="input"
-              placeholder="provider (e.g. openai)"
+              className="input text-xs"
+              placeholder="Provider (e.g. openai, anthropic, groq)"
               value={credProvider}
               onChange={(e) => setCredProvider(e.target.value)}
             />
             <input
-              className="input"
+              className="input text-xs font-mono"
               type="password"
-              placeholder="API key"
+              placeholder="Provider API key"
               value={credKey}
               onChange={(e) => setCredKey(e.target.value)}
             />
-            <button className="btn-primary w-full" type="submit">
-              Save credential
+            <button className="btn-primary w-full text-xs shadow-sm" type="submit">
+              Save Provider Credential
             </button>
           </form>
         </div>
 
-        <div className="card">
-          <h2 className="text-sm font-semibold text-white">Models</h2>
-          <p className="mt-1 text-xs text-gray-500">
-            {r.providers_count} providers · {r.models_count} models discovered
+        {/* Models */}
+        <div className="card shadow-md p-5 border border-black/10 dark:border-white/10 flex flex-col">
+          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+            <span>🤖</span>
+            <span>Discovered AI Models</span>
+          </h2>
+          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+            {r.providers_count} {r.providers_count === 1 ? "provider" : "providers"} · {r.models_count} models discovered
           </p>
-          <div className="mt-3 max-h-64 overflow-auto pr-1">
+
+          <div className="mt-4 max-h-72 overflow-y-auto space-y-1.5 flex-1 pr-1">
             {models.length === 0 ? (
-              <p className="text-xs text-gray-500">
-                No models yet. Start the router and click Discover models.
+              <p className="text-xs text-slate-400 italic py-6 text-center">
+                No models discovered yet. Start the router and click &quot;Discover Models&quot;.
               </p>
             ) : (
-              <ul className="space-y-1">
-                {models.map((m) => (
-                  <li
-                    key={m.id}
-                    className="flex items-center justify-between rounded-lg bg-black/20 px-3 py-1.5 text-xs"
-                  >
-                    <span className="text-gray-200">{m.model_id}</span>
-                    <span className="text-gray-500">{m.provider}</span>
-                  </li>
-                ))}
-              </ul>
+              models.map((m) => (
+                <div
+                  key={m.id}
+                  className="flex items-center justify-between rounded-lg bg-black/5 dark:bg-white/5 px-3 py-2 text-xs border border-black/5 dark:border-white/5 hover:border-brand/40 transition"
+                >
+                  <span className="font-mono font-medium text-slate-800 dark:text-slate-200">{m.model_id}</span>
+                  <span className="text-[10px] font-semibold text-slate-500 uppercase px-2 py-0.5 rounded bg-black/5 dark:bg-white/10">
+                    {m.provider}
+                  </span>
+                </div>
+              ))
             )}
           </div>
         </div>
       </div>
 
-      <div className="card">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-white">Live logs</h2>
-          <button className="btn-ghost" onClick={toggleLogs}>
-            {logOn ? "Stop" : "Attach"}
+      {/* Container Output */}
+      <div className="card shadow-md p-5 border border-black/10 dark:border-white/10">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+            <span>🖥️</span>
+            <span>Container Stdout / Stderr Stream</span>
+          </h2>
+          <button className="btn-ghost text-xs px-3 py-1" onClick={toggleLogs}>
+            {logOn ? "⏹ Disconnect" : "🔌 Attach Stream"}
           </button>
         </div>
-        <pre className="mt-3 h-64 overflow-auto rounded-lg bg-black/40 p-3 text-xs text-gray-300">
-{logs || "Click Attach to stream container logs."}
+        <pre className="h-60 overflow-auto rounded-lg bg-[#090d16] p-3 text-xs font-mono text-slate-300 border border-black/10 dark:border-white/10 select-text">
+{logs || "Click 'Attach Stream' to inspect live container logs."}
         </pre>
       </div>
     </div>

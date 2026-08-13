@@ -34,11 +34,9 @@ export default function DashboardPage() {
     return () => clearInterval(t);
   }, [load]);
 
-  // L-3 FIX: onCreated receives the newly created Router and immediately adds
-  // it to state so the dashboard updates without waiting for the next poll.
   const handleCreated = useCallback((r: Router) => {
     setRouters((prev) => [...prev, r]);
-    load(); // refresh to get server-authoritative state
+    load();
   }, [load]);
 
   const serving = routers.filter((r) => r.runtime_state === "running").length;
@@ -47,36 +45,52 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-white">Dashboard</h1>
-          <p className="text-sm text-gray-400">
-            Managed AI routers and gateways
+          <h1 className="text-2xl font-bold tracking-tight">Control Plane Dashboard</h1>
+          <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+            Enterprise orchestration and hot routing for AI gateways
           </p>
         </div>
-        <button className="btn-primary" onClick={() => setShowAdd(true)}>
-          + Add Router
+        <button
+          id="add-router-btn"
+          className="btn-primary flex items-center gap-1.5 shadow-md hover:shadow-glow-brand"
+          onClick={() => setShowAdd(true)}
+        >
+          <span>＋</span>
+          <span>Add Router</span>
         </button>
       </div>
 
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <Stat label="Routers" value={routers.length} />
-        <Stat label="Serving" value={serving} accent="emerald" />
-        <Stat label="Healthy" value={healthy} accent="emerald" />
-        <Stat label="Models" value={totalModels} />
+        <Stat label="Total Routers" value={routers.length} icon="⚡" />
+        <Stat label="Serving Runtimes" value={serving} accent="emerald" icon="🟢" />
+        <Stat label="Healthy Backends" value={healthy} accent="emerald" icon="🛡️" />
+        <Stat label="Discovered Models" value={totalModels} icon="🤖" />
       </div>
 
       {err && (
-        <div className="card border-red-500/30 text-sm text-red-300">{err}</div>
+        <div className="card border-red-500/30 text-xs text-red-500 bg-red-500/10 p-3">
+          {err}
+        </div>
       )}
 
       {loading ? (
-        <p className="text-sm text-gray-400">Loading…</p>
+        <div className="card p-12 flex flex-col items-center justify-center gap-3 text-slate-400">
+          <div className="h-7 w-7 animate-spin rounded-full border-2 border-brand/30 border-t-brand" />
+          <p className="text-xs font-medium">Loading router topology…</p>
+        </div>
       ) : routers.length === 0 ? (
-        <div className="card text-center">
-          <p className="text-gray-400">No routers yet.</p>
+        <div className="card p-12 text-center shadow-lg">
+          <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl bg-brand/10 text-brand text-2xl">
+            ⚡
+          </div>
+          <h3 className="text-base font-semibold mb-1">No AI routers configured</h3>
+          <p className="text-xs text-slate-500 dark:text-slate-400 max-w-sm mx-auto mb-4">
+            Create your first managed router runtime to start routing traffic through stable OpenAI-compatible endpoints.
+          </p>
           <button
-            className="btn-primary mx-auto mt-3"
+            className="btn-primary mx-auto shadow-md"
             onClick={() => setShowAdd(true)}
           >
             Add your first router
@@ -104,18 +118,25 @@ function Stat({
   label,
   value,
   accent,
+  icon,
 }: {
   label: string;
   value: number;
   accent?: string;
+  icon?: string;
 }) {
   return (
-    <div className="card">
-      <div className="text-xs text-gray-400">{label}</div>
+    <div className="card card-hover relative overflow-hidden group">
+      <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 text-xs font-medium">
+        <span>{label}</span>
+        {icon && <span className="text-sm opacity-70 group-hover:opacity-100 transition">{icon}</span>}
+      </div>
       <div
         className={
-          "mt-1 text-2xl font-semibold " +
-          (accent === "emerald" ? "text-emerald-400" : "text-white")
+          "mt-2 text-3xl font-bold tracking-tight " +
+          (accent === "emerald"
+            ? "text-emerald-500 dark:text-emerald-400"
+            : "text-slate-900 dark:text-slate-100")
         }
       >
         {value}

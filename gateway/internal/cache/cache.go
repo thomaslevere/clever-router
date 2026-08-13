@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
@@ -178,6 +179,33 @@ func (c *Cache) Publish(ctx context.Context, ev ReloadEvent) error {
 		return err
 	}
 	return c.rdb.Publish(ctx, ReloadChannel, b).Err()
+}
+
+// PublishEvent publishes a raw string payload to any named Redis pub/sub channel.
+func (c *Cache) PublishEvent(ctx context.Context, channel, payload string) error {
+	return c.rdb.Publish(ctx, channel, payload).Err()
+}
+
+// SubscribeEvent subscribes to a Redis pub/sub channel with automatic message dispatch.
+func (c *Cache) SubscribeEvent(ctx context.Context, channel string, handler func(payload string)) error {
+	if c == nil || c.rdb == nil {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	pubsub := c.rdb.Subscribe(ctx, channel)
+	defer pubsub.Close()
+	ch := pubsub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case msg, ok := <-ch:
+			if !ok {
+				return fmt.Errorf("channel %s closed", channel)
+			}
+			handler(msg.Payload)
+		}
+	}
 }
 
 // Subscribe returns a channel of ReloadEvents.

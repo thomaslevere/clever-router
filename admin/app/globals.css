@@ -3,37 +3,157 @@
 @tailwind utilities;
 
 :root {
+  color-scheme: light;
+  --bg-main: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-card-subtle: #f1f5f9;
+  --border-color: rgba(0, 0, 0, 0.08);
+  --text-main: #0f172a;
+  --text-muted: #64748b;
+  --card-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05), 0 0 0 1px rgba(0, 0, 0, 0.06);
+  --card-shadow-hover: 0 10px 30px -4px rgba(0, 0, 0, 0.1), 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+
+html.dark {
   color-scheme: dark;
+  --bg-main: #070a0f;
+  --bg-card: #0d121c;
+  --bg-card-subtle: #111723;
+  --border-color: rgba(255, 255, 255, 0.08);
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --card-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.07);
+  --card-shadow-hover: 0 12px 32px -4px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(99, 102, 241, 0.3);
 }
 
 body {
-  background: #0b0f17;
-  color: #e5e7eb;
+  background: var(--bg-main);
+  color: var(--text-main);
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  min-height: 100vh;
 }
 
+/* Modern Card with Enterprise multi-layer smooth elevation */
 .card {
-  @apply rounded-xl border border-white/10 bg-white/[0.03] p-5;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  box-shadow: var(--card-shadow);
+  border-radius: 0.875rem;
+  padding: 1.25rem;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.btn {
-  @apply inline-flex items-center justify-center rounded-lg px-3 py-2 text-sm font-medium transition;
+.card-hover:hover {
+  box-shadow: var(--card-shadow-hover);
+  transform: translateY(-2px);
 }
-.btn-primary {
-  @apply btn bg-brand text-white hover:bg-brand-dark;
-}
-.btn-ghost {
-  @apply btn border border-white/10 text-gray-200 hover:bg-white/5;
-}
-.btn-danger {
-  @apply btn bg-red-600/90 text-white hover:bg-red-600;
-}
+
+/* Modern Inputs */
 .input {
-  @apply w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-gray-100 outline-none focus:border-brand;
+  width: 100%;
+  border-radius: 0.625rem;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card-subtle);
+  padding: 0.55rem 0.85rem;
+  font-size: 0.875rem;
+  color: var(--text-main);
+  outline: none;
+  transition: all 0.15s ease-in-out;
 }
+
+.input:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+}
+
+/* Modern Enterprise Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.625rem;
+  padding: 0.5rem 0.9rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: all 0.15s ease-in-out;
+  cursor: pointer;
+  user-select: none;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn-primary {
+  @apply btn bg-brand text-white hover:bg-brand-dark shadow-sm hover:shadow-glow-brand;
+}
+
+.btn-ghost {
+  @apply btn border border-black/10 dark:border-white/10 text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/5;
+}
+
+.btn-danger {
+  @apply btn bg-red-600 text-white hover:bg-red-700 shadow-sm;
+}
+
+.btn-secondary {
+  @apply btn bg-black/5 dark:bg-white/10 text-gray-800 dark:text-gray-100 hover:bg-black/10 dark:hover:bg-white/15;
+}
+
+/* Status Badges */
 .badge {
-  @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 9999px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
-.badge-green { @apply badge bg-emerald-500/15 text-emerald-300; }
-.badge-red   { @apply badge bg-red-500/15 text-red-300; }
-.badge-amber { @apply badge bg-amber-500/15 text-amber-300; }
-.badge-gray  { @apply badge bg-white/10 text-gray-300; }
+
+.badge-green {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.25);
+}
+
+.badge-red {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.25);
+}
+
+.badge-amber {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.badge-gray {
+  background: rgba(100, 116, 139, 0.15);
+  color: #64748b;
+  border: 1px solid rgba(100, 116, 139, 0.25);
+}
+
+.badge-blue {
+  background: rgba(99, 102, 241, 0.15);
+  color: #6366f1;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(150, 150, 150, 0.25);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(150, 150, 150, 0.4);
+}

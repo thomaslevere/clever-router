@@ -437,3 +437,54 @@ func (s *Store) ListModels(ctx context.Context, routerID string) ([]Model, error
 	}
 	return out, rows.Err()
 }
+
+// SystemLog represents a structured event recorded in the centralized log system.
+type SystemLog struct {
+	ID         int64     `json:"id"`
+	TS         time.Time `json:"ts"`
+	Level      string    `json:"level"`
+	Source     string    `json:"source"`
+	RouterSlug string    `json:"router_slug,omitempty"`
+	Message    string    `json:"message"`
+	Metadata   Map       `json:"metadata"`
+}
+
+func (s *Store) InsertSystemLog(ctx context.Context, l *SystemLog) error {
+	if l.Metadata == nil {
+		l.Metadata = Map{}
+	}
+	return s.Pool.QueryRow(ctx, `
+		INSERT INTO system_logs (level, source, router_slug, message, metadata)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, ts`,
+		l.Level, l.Source, l.RouterSlug, l.Message, l.Metadata).
+		Scan(&l.ID, &l.TS)
+}
+
+func (s *Store) ListSystemLogs(ctx context.Context, source, level string, limit int) ([]SystemLog, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	query := `
+		SELECT id, ts, level, source, router_slug, message, metadata
+		FROM system_logs
+		WHERE ($1 = '' OR source = $1)
+		  AND ($2 = '' OR level = $2)
+		ORDER BY ts DESC
+		LIMIT $3`
+	rows, err := s.Pool.Query(ctx, query, source, level, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SystemLog{}
+	for rows.Next() {
+		var l SystemLog
+		if err := rows.Scan(&l.ID, &l.TS, &l.Level, &l.Source, &l.RouterSlug, &l.Message, &l.Metadata); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+

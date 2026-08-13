@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/clever-route/gateway/internal/keys"
+	"github.com/clever-route/gateway/internal/logger"
 	"github.com/clever-route/gateway/internal/router"
 	"github.com/clever-route/gateway/internal/store"
 	"github.com/gin-gonic/gin"
@@ -177,6 +178,16 @@ func (p *Proxy) recordUsage(keyID, slug, model string, status int, sc *usageScan
 	if keyID != "" && costCents > 0 {
 		_ = p.store.IncrSpentCents(ctx, keyID, costCents)
 	}
+
+	logger.Info("proxy", slug, fmt.Sprintf("AI request: model=%s status=%d tokens=%d (prompt=%d, comp=%d)", model, status, total, prompt, completion), store.Map{
+		"key_id":            keyID,
+		"model":             model,
+		"status":            status,
+		"prompt_tokens":     prompt,
+		"completion_tokens": completion,
+		"total_tokens":      total,
+		"provider":          sc.provider,
+	})
 }
 
 // ----- helpers -----

@@ -12,6 +12,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/clever-route/gateway/internal/cache"
 	"github.com/clever-route/gateway/internal/config"
 	"github.com/clever-route/gateway/internal/keys"
+	"github.com/clever-route/gateway/internal/logger"
 	"github.com/clever-route/gateway/internal/proxy"
 	"github.com/clever-route/gateway/internal/router"
 	"github.com/clever-route/gateway/internal/secrets"
@@ -52,13 +54,15 @@ func validateSlug(slug string) error {
 }
 
 type API struct {
-	cfg     *config.Config
-	store   *store.Store
-	cache   *cache.Cache
-	box     *secrets.Box
-	manager *adapters.Manager
-	table   *router.Table
-	rest    *gin.Engine // private engine mounted under /admin/api/*
+	cfg      *config.Config
+	store    *store.Store
+	cache    *cache.Cache
+	box      *secrets.Box
+	manager  *adapters.Manager
+	table    *router.Table
+	rest     *gin.Engine // private engine mounted under /admin/api/*
+	logHub   *WSHub
+	auditHub *WSHub
 }
 
 type Deps struct {
@@ -71,7 +75,21 @@ type Deps struct {
 }
 
 func New(d Deps) *API {
-	return &API{cfg: d.Cfg, store: d.Store, cache: d.Cache, box: d.Box, manager: d.Manager, table: d.Table}
+	logHub := newWSHub(d.Cache)
+	auditHub := newWSHub(d.Cache)
+	logHub.StartListening(context.Background(), "events:logs")
+	auditHub.StartListening(context.Background(), "events:audit")
+
+	return &API{
+		cfg:      d.Cfg,
+		store:    d.Store,
+		cache:    d.Cache,
+		box:      d.Box,
+		manager:  d.Manager,
+		table:    d.Table,
+		logHub:   logHub,
+		auditHub: auditHub,
+	}
 }
 
 // Register mounts every route on the engine: health, the admin UI
@@ -122,6 +140,15 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 	g.POST("/auth/login", a.login)
 	g.POST("/auth/logout", a.logout)
 	g.GET("/auth/me", a.authMe)
+
+	// Real-time WebSockets
+	g.GET("/ws/logs", a.wsLogs)
+	g.GET("/ws/audit", a.wsAudit)
+
+	// System & Aggregator Logs
+	g.GET("/logs", a.listLogs)
+	g.GET("/logs/download", a.downloadLogs)
+	g.GET("/audit/download", a.downloadAudit)
 
 	// Router CRUD
 	g.GET("/routers", a.listRouters)
@@ -706,6 +733,92 @@ func (a *API) authMe(c *gin.Context) {
 	})
 }
 
+func (a *API) listLogs(c *gin.Context) {
+	source := c.Query("source")
+	level := c.Query("level")
+	limitStr := c.Query("limit")
+	limit := 100
+	if limitStr != "" {
+		if n, err := strconv.Atoi(limitStr); err == nil {
+			limit = n
+		}
+	}
+	logs, err := a.store.ListSystemLogs(c.Request.Context(), source, level, limit)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, logs)
+}
+
+func (a *API) downloadLogs(c *gin.Context) {
+	source := c.Query("source")
+	level := c.Query("level")
+	logs, err := a.store.ListSystemLogs(c.Request.Context(), source, level, 500)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=cleverroute-logs-%s.txt", time.Now().Format("20060102-150405")))
+	c.Header("Content-Type", "text/plain; charset=utf-8")
+
+	var b strings.Builder
+	b.WriteString("================================================================================\n")
+	b.WriteString(fmt.Sprintf("CleverRoute System & Aggregator Logs Export — %s\n", time.Now().UTC().Format(time.RFC1123)))
+	b.WriteString(fmt.Sprintf("Filters: Level=%s Source=%s Total Entries=%d\n", level, source, len(logs)))
+	b.WriteString("================================================================================\n\n")
+
+	for i := len(logs) - 1; i >= 0; i-- {
+		l := logs[i]
+		metaBytes, _ := json.Marshal(l.Metadata)
+		src := l.Source
+		if l.RouterSlug != "" {
+			src = l.Source + ":" + l.RouterSlug
+		}
+		b.WriteString(fmt.Sprintf("[%s] [%-5s] [%-16s] %s %s\n",
+			l.TS.Format(time.RFC3339),
+			l.Level,
+			src,
+			l.Message,
+			string(metaBytes),
+		))
+	}
+
+	c.String(200, b.String())
+}
+
+func (a *API) downloadAudit(c *gin.Context) {
+	entries, err := a.store.ListAuditLog(c.Request.Context(), 500)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=cleverroute-audit-%s.txt", time.Now().Format("20060102-150405")))
+	c.Header("Content-Type", "text/plain; charset=utf-8")
+
+	var b strings.Builder
+	b.WriteString("================================================================================\n")
+	b.WriteString(fmt.Sprintf("CleverRoute Audit Log Export — %s\n", time.Now().UTC().Format(time.RFC1123)))
+	b.WriteString(fmt.Sprintf("Total Audit Entries=%d\n", len(entries)))
+	b.WriteString("================================================================================\n\n")
+
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		afterBytes, _ := json.Marshal(e.After)
+		b.WriteString(fmt.Sprintf("[%s] Actor=%-10s Action=%-18s Target=%-20s Details=%s\n",
+			e.Ts.Format(time.RFC3339),
+			e.ActorEmail,
+			e.Action,
+			fmt.Sprintf("%s:%s", e.TargetType, e.TargetID),
+			string(afterBytes),
+		))
+	}
+
+	c.String(200, b.String())
+}
+
 // ----- helpers -----
 
 func (a *API) audit(c *gin.Context, action, targetType, targetID string, before, after any) {
@@ -717,6 +830,23 @@ func (a *API) audit(c *gin.Context, action, targetType, targetID string, before,
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = a.store.Audit(ctx, actorStr, action, targetType, targetID, toMap(before), toMap(after))
+
+	// Broadcast audit event to Redis for real-time WebSocket clients
+	auditEvent := store.Map{
+		"id":          time.Now().UnixNano(),
+		"ts":          time.Now().UTC(),
+		"actor":       actorStr,
+		"action":      action,
+		"target_type": targetType,
+		"target_id":   targetID,
+		"after":       after,
+	}
+	if b, err := json.Marshal(auditEvent); err == nil {
+		_ = a.cache.PublishEvent(ctx, "events:audit", string(b))
+	}
+
+	// Also record in central logger for unified persistence & live streaming
+	logger.Info("audit", targetID, fmt.Sprintf("%s performed %s on %s", actorStr, action, targetType), toMap(after))
 }
 
 func toMap(v any) store.Map {

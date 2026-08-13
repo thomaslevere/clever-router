@@ -8,6 +8,7 @@ export default function KeysPage() {
   const [keys, setKeys] = useState<VirtualKey[]>([]);
   const [err, setErr] = useState("");
   const [created, setCreated] = useState<string>("");
+  const [copied, setCopied] = useState(false);
   const [form, setForm] = useState({
     name: "",
     budget_cents: 0,
@@ -48,6 +49,7 @@ export default function KeysPage() {
           : [],
       });
       setCreated(res.key);
+      setCopied(false);
       setForm({ name: "", budget_cents: 0, rate_limit_rpm: 0, model_allowlist: "", router_allowlist: "" });
       load();
     } catch (e: any) {
@@ -58,91 +60,179 @@ export default function KeysPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-semibold text-white">Virtual Keys</h1>
-        <p className="text-sm text-gray-400">
-          Clients authenticate with these keys. Stored only as a hash.
+        <h1 className="text-2xl font-bold tracking-tight">Virtual Keys</h1>
+        <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+          Issue scoped bearer keys (<code className="text-brand">Bearer cr-…</code>) for downstream AI clients and applications.
         </p>
       </div>
 
       {created && (
-        <div className="card border-emerald-500/30">
-          <p className="text-sm text-emerald-300">
-            Key created — copy it now (shown only once):
-          </p>
-          <code className="mt-2 block break-all rounded-lg bg-black/40 p-3 text-sm">
-            {created}
-          </code>
-          <button className="btn-ghost mt-2" onClick={() => navigator.clipboard.writeText(created)}>
-            Copy
-          </button>
+        <div className="card border-emerald-500/30 bg-emerald-500/5 p-5 shadow-lg">
+          <div className="flex items-center gap-2 text-sm font-semibold text-emerald-600 dark:text-emerald-400">
+            <span>✅</span>
+            <span>Virtual Key Generated Successfully — Copy it now (shown once only):</span>
+          </div>
+          <div className="mt-3 flex items-center gap-2">
+            <code className="block flex-1 break-all rounded-lg border border-black/10 dark:border-white/10 bg-black/20 dark:bg-black/50 p-3 text-xs font-mono text-emerald-400">
+              {created}
+            </code>
+            <button
+              className="btn-primary text-xs px-4 py-3 shrink-0 shadow-md"
+              onClick={() => {
+                navigator.clipboard.writeText(created);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              }}
+            >
+              {copied ? "Copied! ✓" : "Copy Key"}
+            </button>
+          </div>
         </div>
       )}
 
-      <div className="card">
-        <h2 className="text-sm font-semibold text-white">Create key</h2>
-        <form onSubmit={create} className="mt-3 grid gap-3 sm:grid-cols-2">
-          <input className="input" placeholder="Name" required value={form.name}
-            onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} />
-          <input className="input" type="number" placeholder="Budget (cents, 0=unlimited)"
-            value={form.budget_cents}
-            onChange={(e) => setForm((f) => ({ ...f, budget_cents: Number(e.target.value) }))} />
-          <input className="input" type="number" placeholder="Rate limit (RPM, 0=unlimited)"
-            value={form.rate_limit_rpm}
-            onChange={(e) => setForm((f) => ({ ...f, rate_limit_rpm: Number(e.target.value) }))} />
-          <input className="input" placeholder="Models (comma, empty=all)"
-            value={form.model_allowlist}
-            onChange={(e) => setForm((f) => ({ ...f, model_allowlist: e.target.value }))} />
-          <input className="input sm:col-span-2" placeholder="Routers (comma slugs, empty=all)"
-            value={form.router_allowlist}
-            onChange={(e) => setForm((f) => ({ ...f, router_allowlist: e.target.value }))} />
-          <div className="sm:col-span-2 flex justify-end">
-            <button className="btn-primary" type="submit">Create key</button>
+      {/* Create Key Form */}
+      <div className="card p-6 shadow-md border border-black/10 dark:border-white/10">
+        <h2 className="text-base font-bold mb-4 flex items-center gap-2">
+          <span>🔑</span>
+          <span>Generate New Virtual Key</span>
+        </h2>
+        <form onSubmit={create} className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1">
+              Key Name / Description
+            </label>
+            <input
+              id="new-key-name"
+              className="input"
+              placeholder="e.g. production-app-frontend"
+              required
+              value={form.name}
+              onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1">
+              Spend Budget (cents, 0 = unlimited)
+            </label>
+            <input
+              className="input"
+              type="number"
+              placeholder="0"
+              value={form.budget_cents}
+              onChange={(e) => setForm((f) => ({ ...f, budget_cents: Number(e.target.value) }))}
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1">
+              Rate Limit (RPM, 0 = unlimited)
+            </label>
+            <input
+              className="input"
+              type="number"
+              placeholder="0"
+              value={form.rate_limit_rpm}
+              onChange={(e) => setForm((f) => ({ ...f, rate_limit_rpm: Number(e.target.value) }))}
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1">
+              Model Allowlist (comma separated)
+            </label>
+            <input
+              className="input"
+              placeholder="e.g. gpt-4o, claude-3-5-sonnet (empty = all)"
+              value={form.model_allowlist}
+              onChange={(e) => setForm((f) => ({ ...f, model_allowlist: e.target.value }))}
+            />
+          </div>
+
+          <div className="sm:col-span-2">
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1">
+              Router Allowlist (comma separated router slugs)
+            </label>
+            <input
+              className="input"
+              placeholder="e.g. omniroute-main, litellm-eu (empty = all)"
+              value={form.router_allowlist}
+              onChange={(e) => setForm((f) => ({ ...f, router_allowlist: e.target.value }))}
+            />
+          </div>
+
+          <div className="sm:col-span-2 flex justify-end pt-2">
+            <button id="create-key-submit-btn" className="btn-primary text-xs font-semibold shadow-md" type="submit">
+              ＋ Generate Virtual Key
+            </button>
           </div>
         </form>
       </div>
 
-      <div className="card">
-        <h2 className="text-sm font-semibold text-white">Keys</h2>
-        <table className="mt-3 w-full text-sm">
-          <thead className="text-xs text-gray-400">
+      {/* Keys Table */}
+      <div className="card overflow-hidden p-0 shadow-lg border border-black/10 dark:border-white/10">
+        <div className="p-4 border-b border-black/10 dark:border-white/10 bg-slate-100/70 dark:bg-white/[0.02]">
+          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100">Active Virtual Keys</h2>
+        </div>
+        <table className="w-full text-xs">
+          <thead className="border-b border-black/10 dark:border-white/10 text-slate-500 dark:text-slate-400 uppercase tracking-wider font-semibold">
             <tr>
-              <th className="text-left font-medium">Name</th>
-              <th className="text-left font-medium">Budget</th>
-              <th className="text-left font-medium">RPM</th>
-              <th className="text-left font-medium">Status</th>
-              <th></th>
+              <th className="px-4 py-3 text-left">Key Name</th>
+              <th className="px-4 py-3 text-left">Budget Usage</th>
+              <th className="px-4 py-3 text-left">Rate Limit</th>
+              <th className="px-4 py-3 text-left">Status</th>
+              <th className="px-4 py-3 text-right">Actions</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-black/5 dark:divide-white/5">
             {keys.map((k) => (
-              <tr key={k.id} className="border-t border-white/5">
-                <td className="py-2 text-gray-200">{k.name}</td>
-                <td className="py-2 text-gray-400">
-                  {k.budget_cents ? `${k.spent_cents}/${k.budget_cents}c` : "∞"}
+              <tr key={k.id} className="hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition">
+                <td className="px-4 py-3 font-semibold text-slate-800 dark:text-slate-200">
+                  <div className="flex items-center gap-2">
+                    <span>🔑</span>
+                    <span>{k.name}</span>
+                  </div>
                 </td>
-                <td className="py-2 text-gray-400">
-                  {k.rate_limit_rpm || "∞"}
+                <td className="px-4 py-3 text-slate-600 dark:text-slate-400 font-mono">
+                  {k.budget_cents ? `${k.spent_cents}/${k.budget_cents}¢` : "Unlimited (∞)"}
                 </td>
-                <td className="py-2">
+                <td className="px-4 py-3 text-slate-600 dark:text-slate-400 font-mono">
+                  {k.rate_limit_rpm ? `${k.rate_limit_rpm} RPM` : "Unlimited (∞)"}
+                </td>
+                <td className="px-4 py-3">
                   <span className={k.status === "active" ? "badge-green" : "badge-gray"}>
                     {k.status}
                   </span>
                 </td>
-                <td className="py-2 text-right">
+                <td className="px-4 py-3 text-right">
                   {k.status === "active" && (
-                    <button className="text-xs text-red-400 hover:underline"
-                      onClick={async () => { await api.post(`/keys/${k.id}/revoke`); load(); }}>
-                      revoke
+                    <button
+                      className="text-xs text-red-500 hover:text-red-700 dark:hover:text-red-400 font-semibold transition"
+                      onClick={async () => {
+                        if (confirm(`Revoke key "${k.name}"?`)) {
+                          await api.post(`/keys/${k.id}/revoke`);
+                          load();
+                        }
+                      }}
+                    >
+                      Revoke
                     </button>
                   )}
                 </td>
               </tr>
             ))}
+            {keys.length === 0 && (
+              <tr>
+                <td colSpan={5} className="px-4 py-8 text-center text-slate-400">
+                  No virtual keys created yet.
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
 
-      {err && <div className="card border-red-500/30 text-sm text-red-300">{err}</div>}
+      {err && <div className="card border-red-500/30 text-xs text-red-500 bg-red-500/10 p-3">{err}</div>}
     </div>
   );
 }

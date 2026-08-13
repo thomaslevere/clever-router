@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/clever-route/gateway/internal/cache"
+	"github.com/clever-route/gateway/internal/logger"
 	"github.com/clever-route/gateway/internal/router"
 	"github.com/clever-route/gateway/internal/secrets"
 	"github.com/clever-route/gateway/internal/store"
@@ -219,6 +220,12 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	// Best-effort discovery; never block traffic on it.
 	_ = m.DiscoverModels(ctx, r, ad, addr)
 	_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
+	logger.Info("router", r.Slug, fmt.Sprintf("Router container started and healthy at %s", addr), store.Map{
+		"slug":         r.Slug,
+		"adapter":      r.AdapterType,
+		"container_id": created.ID[:12],
+		"target_addr":  addr,
+	})
 	return nil
 }
 
@@ -232,6 +239,9 @@ func (m *Manager) Stop(ctx context.Context, r *store.Router) error {
 	_ = m.cache.DelRoute(ctx, r.Slug)
 	m.table.Delete(r.Slug)
 	_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
+	logger.Info("router", r.Slug, fmt.Sprintf("Router container stopped for %s", r.Slug), store.Map{
+		"slug": r.Slug,
+	})
 	return nil
 }
 

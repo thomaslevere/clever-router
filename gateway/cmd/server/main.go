@@ -13,6 +13,7 @@ import (
 	"github.com/clever-route/gateway/internal/api"
 	"github.com/clever-route/gateway/internal/cache"
 	"github.com/clever-route/gateway/internal/config"
+	"github.com/clever-route/gateway/internal/logger"
 	"github.com/clever-route/gateway/internal/router"
 	"github.com/clever-route/gateway/internal/runtime"
 	"github.com/clever-route/gateway/internal/secrets"
@@ -47,6 +48,15 @@ func main() {
 		log.Fatalf("redis: %v", err)
 	}
 	defer c.Close()
+
+	// Centralized Logging Hub (Disk file + Postgres + Redis PubSub + Stdout)
+	logHub, err := logger.Init(st, c, "logs")
+	if err != nil {
+		log.Printf("warning: logger init: %v", err)
+	} else {
+		defer logHub.Close()
+		logger.Info("system", "", "CleverRoute control plane booting", store.Map{"env": cfg.Environment, "port": cfg.HTTPPort})
+	}
 
 	// Secrets (AES-256-GCM envelope)
 	box, err := secrets.New(cfg.EncryptionKey)

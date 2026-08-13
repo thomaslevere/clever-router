@@ -54,57 +54,96 @@ export default function AddRouterModal({
   }
 
   return (
-    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4">
-      <div className="card w-full max-w-lg">
-        <div className="flex items-center justify-between">
-          <h2 className="text-base font-semibold text-white">Add Router</h2>
-          <button className="btn-ghost" onClick={onClose}>
-            Close
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+      <div className="card w-full max-w-lg shadow-2xl border border-black/10 dark:border-white/10 p-6">
+        <div className="flex items-center justify-between border-b border-black/10 dark:border-white/10 pb-4">
+          <div className="flex items-center gap-2.5">
+            <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand text-white font-bold text-sm">
+              ＋
+            </span>
+            <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">
+              Deploy AI Router Runtime
+            </h2>
+          </div>
+          <button className="btn-ghost text-xs px-2.5 py-1" onClick={onClose}>
+            ✕
           </button>
         </div>
-        <form onSubmit={submit} className="mt-4 space-y-3">
+
+        <form onSubmit={submit} className="mt-5 space-y-4">
           <div>
-            <label className="text-xs text-gray-400">Slug</label>
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1">
+              Slug Identifier
+            </label>
             <input
-              className="input mt-1"
+              id="new-router-slug"
+              className="input"
               required
-              placeholder="omniroute-prod"
+              placeholder="e.g. omniroute-prod"
               value={form.slug}
               onChange={(e) =>
                 setForm((f) => ({ ...f, slug: e.target.value.toLowerCase() }))
               }
             />
-            <p className="mt-1 text-xs text-gray-500">
-              Exposed at <code>/{"{slug}"}/v1/...</code>
+            <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+              Exposed namespaced endpoint at: <code className="text-brand">/{form.slug || "{slug}"}/v1/…</code>
             </p>
           </div>
+
           <div>
-            <label className="text-xs text-gray-400">Name</label>
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1">
+              Display Name
+            </label>
             <input
-              className="input mt-1"
-              placeholder="OmniRoute Production"
+              id="new-router-name"
+              className="input"
+              placeholder="e.g. OmniRoute Production Gateway"
               value={form.name}
               onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
             />
           </div>
-          <div>
-            <label className="text-xs text-gray-400">Adapter</label>
-            <select
-              className="input mt-1"
-              value={form.adapter_type}
-              onChange={(e) => pickAdapter(e.target.value)}
-            >
-              {adapters.map((a) => (
-                <option key={a.value} value={a.value}>
-                  {a.label}
-                </option>
-              ))}
-            </select>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1">
+                Adapter Engine
+              </label>
+              <select
+                className="input cursor-pointer"
+                value={form.adapter_type}
+                onChange={(e) => pickAdapter(e.target.value)}
+              >
+                {adapters.map((a) => (
+                  <option key={a.value} value={a.value}>
+                    {a.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1">
+                Initial State
+              </label>
+              <select
+                className="input cursor-pointer"
+                value={form.desired_state}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, desired_state: e.target.value }))
+                }
+              >
+                <option value="stopped">Stopped (Manual Start)</option>
+                <option value="running">Running (Start Now)</option>
+              </select>
+            </div>
           </div>
+
           <div>
-            <label className="text-xs text-gray-400">Image</label>
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1">
+              Docker Image Reference
+            </label>
             <input
-              className="input mt-1"
+              className="input font-mono text-xs"
               required
               placeholder="diegosouzapw/omniroute:latest"
               value={form.image_ref}
@@ -112,30 +151,28 @@ export default function AddRouterModal({
                 setForm((f) => ({ ...f, image_ref: e.target.value }))
               }
             />
-            <p className="mt-1 text-xs text-gray-500">
-              Must be in the server ALLOWED_IMAGES allowlist.
+            <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+              Must match the server allowlist (<code className="text-slate-400">ALLOWED_IMAGES</code>).
             </p>
           </div>
-          <div>
-            <label className="text-xs text-gray-400">On create</label>
-            <select
-              className="input mt-1"
-              value={form.desired_state}
-              onChange={(e) =>
-                setForm((f) => ({ ...f, desired_state: e.target.value }))
-              }
-            >
-              <option value="stopped">Stopped (start manually)</option>
-              <option value="running">Running (start now)</option>
-            </select>
-          </div>
-          {err && <p className="text-sm text-red-400">{err}</p>}
-          <div className="flex justify-end gap-2 pt-2">
-            <button type="button" className="btn-ghost" onClick={onClose}>
+
+          {err && (
+            <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-2.5 text-xs text-red-500">
+              ⚠️ {err}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2.5 pt-3 border-t border-black/10 dark:border-white/10">
+            <button type="button" className="btn-ghost text-xs" onClick={onClose}>
               Cancel
             </button>
-            <button type="submit" className="btn-primary" disabled={busy}>
-              {busy ? "Creating…" : "Create"}
+            <button
+              id="modal-submit-btn"
+              type="submit"
+              className="btn-primary text-xs font-semibold shadow-md"
+              disabled={busy}
+            >
+              {busy ? "Deploying Runtime…" : "Deploy Router"}
             </button>
           </div>
         </form>

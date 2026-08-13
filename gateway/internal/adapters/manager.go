@@ -193,6 +193,13 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 		},
 	}
 
+	// Clean up any stale container with the same name to avoid Docker name conflict error
+	if existing, err := m.docker.ContainerInspect(ctx, name); err == nil && existing.ID != "" {
+		stopTimeout := 2
+		_ = m.docker.ContainerStop(ctx, existing.ID, container.StopOptions{Timeout: &stopTimeout})
+		_ = m.docker.ContainerRemove(ctx, existing.ID, container.RemoveOptions{Force: true})
+	}
+
 	created, err := m.docker.ContainerCreate(ctx, cfg, host, netCfg, nil, name)
 	if err != nil {
 		return fmt.Errorf("create container: %w", err)

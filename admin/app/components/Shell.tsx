@@ -27,8 +27,28 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   const [err, setErr] = useState("");
 
   useEffect(() => {
-    setAuthed(!!getToken());
-    setCurrentUser(getUser());
+    const token = getToken();
+    if (token) {
+      setAuthed(true);
+      setCurrentUser(getUser());
+      // Validate session with backend and refresh user state
+      api.get<{ username: string; role: string; user_id: string }>("/auth/me")
+        .then((res) => {
+          if (res && res.username) {
+            const u = { username: res.username, role: res.role, id: res.user_id };
+            setUser(u);
+            setCurrentUser(u);
+          }
+        })
+        .catch(() => {
+          // Token expired or invalid
+          clearToken();
+          setAuthed(false);
+          setCurrentUser(null);
+        });
+    } else {
+      setAuthed(false);
+    }
   }, []);
 
   useEffect(() => {

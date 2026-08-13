@@ -223,6 +223,8 @@ func (a *API) adminAuth() gin.HandlerFunc {
 			c.Set("actor", sess.Username)
 			c.Set("user_id", sess.UserID)
 			c.Set("role", sess.Role)
+			// Sliding 7-day expiration: extend TTL on active panel usage
+			_ = a.cache.SetSession(c.Request.Context(), tok, sess, 7*24*time.Hour)
 			c.Next()
 			return
 		}

@@ -51,6 +51,10 @@ async function req<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
     },
   });
   if (res.status === 401) {
+    if (typeof window !== "undefined") {
+      clearToken();
+      window.dispatchEvent(new Event("cr:auth-changed"));
+    }
     throw new UnauthorizedError();
   }
   if (!res.ok) {

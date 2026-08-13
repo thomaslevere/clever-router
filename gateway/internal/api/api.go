@@ -201,12 +201,14 @@ func (a *API) adminAuth() gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		tok := ""
 		authHeader := c.GetHeader("Authorization")
-		if !strings.HasPrefix(authHeader, "Bearer ") {
-			c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized"})
-			return
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tok = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 		}
-		tok := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		if tok == "" {
+			tok = strings.TrimSpace(c.Query("token"))
+		}
 		if tok == "" {
 			c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized"})
 			return

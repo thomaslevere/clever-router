@@ -60,15 +60,9 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             </div>
           </div>
 
-          <div className="mb-5 rounded-lg border border-brand/20 bg-brand/5 p-3 text-xs text-gray-300 space-y-1">
-            <p className="font-semibold text-brand">Preseeded Admin Accounts:</p>
-            <div className="grid grid-cols-2 gap-2 text-[11px] text-gray-400">
-              <div>• User: <span className="text-gray-200 font-mono">salman</span></div>
-              <div>• Pass: <span className="text-gray-200 font-mono">136517</span></div>
-              <div>• User: <span className="text-gray-200 font-mono">azam</span></div>
-              <div>• Pass: <span className="text-gray-200 font-mono">136517</span></div>
-            </div>
-          </div>
+          <p className="mb-6 text-sm text-gray-400">
+            Sign in with your administrator credentials to access the control plane.
+          </p>
 
           <form
             onSubmit={async (e) => {

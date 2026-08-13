@@ -18,7 +18,8 @@ export default function KeysPage() {
 
   const load = useCallback(async () => {
     try {
-      setKeys(await api.get<VirtualKey[]>("/keys"));
+      const res = await api.get<VirtualKey[]>("/keys");
+      setKeys(Array.isArray(res) ? res : []);
     } catch (e: any) {
       if (e instanceof UnauthorizedError) {
         window.dispatchEvent(new Event("cr:auth-changed"));

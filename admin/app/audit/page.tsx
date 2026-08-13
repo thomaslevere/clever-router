@@ -10,7 +10,9 @@ export default function AuditPage() {
 
   const load = useCallback(async () => {
     try {
-      setRows(await api.get<AuditEntry[]>("/audit"));
+      const res = await api.get<AuditEntry[]>("/audit");
+      setRows(Array.isArray(res) ? res : []);
+      setErr("");
     } catch (e: any) {
       if (e instanceof UnauthorizedError) {
         window.dispatchEvent(new Event("cr:auth-changed"));

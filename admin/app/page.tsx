@@ -14,7 +14,8 @@ export default function DashboardPage() {
 
   const load = useCallback(async () => {
     try {
-      setRouters(await api.get<Router[]>("/routers"));
+      const res = await api.get<Router[]>("/routers");
+      setRouters(Array.isArray(res) ? res : []);
       setErr("");
     } catch (e: any) {
       if (e instanceof UnauthorizedError) {

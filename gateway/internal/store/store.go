@@ -77,7 +77,7 @@ func (s *Store) ListRouters(ctx context.Context) ([]Router, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Router
+	out := []Router{}
 	for rows.Next() {
 		r, err := scanRouter(rows)
 		if err != nil {
@@ -201,7 +201,7 @@ func (s *Store) ListCredentials(ctx context.Context, routerID string) ([]Provide
 		return nil, err
 	}
 	defer rows.Close()
-	var out []ProviderCredential
+	out := []ProviderCredential{}
 	for rows.Next() {
 		var c ProviderCredential
 		if err := rows.Scan(&c.ID, &c.RouterID, &c.Provider, &c.KeyID, &c.Metadata, &c.LastVerifiedAt, &c.CreatedAt); err != nil {
@@ -273,7 +273,7 @@ func (s *Store) ListVirtualKeys(ctx context.Context) ([]VirtualKey, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []VirtualKey
+	out := []VirtualKey{}
 	for rows.Next() {
 		var k VirtualKey
 		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.BudgetCents, &k.SpentCents, &k.RateLimitRPM, &k.ModelAllow, &k.RouterAllow, &k.Status, &k.LastUsedAt, &k.CreatedAt); err != nil {
@@ -401,7 +401,7 @@ func (s *Store) ListModels(ctx context.Context, routerID string) ([]Model, error
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Model
+	out := []Model{}
 	for rows.Next() {
 		var m Model
 		if err := rows.Scan(&m.ID, &m.RouterID, &m.ModelID, &m.Provider, &m.Modalities, &m.LastSeenAt); err != nil {

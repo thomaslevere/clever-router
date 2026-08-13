@@ -12,7 +12,8 @@ export default function RoutersPage() {
 
   const load = useCallback(async () => {
     try {
-      setRouters(await api.get<Router[]>("/routers"));
+      const res = await api.get<Router[]>("/routers");
+      setRouters(Array.isArray(res) ? res : []);
     } catch (e: any) {
       if (e instanceof UnauthorizedError) window.dispatchEvent(new Event("cr:auth-changed"));
     }

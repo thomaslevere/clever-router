@@ -1,12 +1,12 @@
 package api
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -14,20 +14,15 @@ import (
 
 	"github.com/clever-route/gateway/internal/logger"
 	"github.com/clever-route/gateway/internal/store"
+	"github.com/creack/pty"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
 
-type terminalReq struct {
-	Cmd string `json:"cmd"`
-	Cwd string `json:"cwd,omitempty"`
-}
-
-type terminalResp struct {
-	Type     string `json:"type"` // "stdout", "stderr", "exit", "error", "info"
-	Data     string `json:"data,omitempty"`
-	ExitCode int    `json:"exit_code,omitempty"`
-	Cmd      string `json:"cmd,omitempty"`
+type resizeMsg struct {
+	Type string `json:"type"`
+	Cols uint16 `json:"cols"`
+	Rows uint16 `json:"rows"`
 }
 
 func (a *API) wsTerminal(c *gin.Context) {
@@ -47,25 +42,79 @@ func (a *API) wsTerminal(c *gin.Context) {
 	}
 	defer conn.Close()
 
-	var writeMu sync.Mutex
-	sendMsg := func(resp terminalResp) {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		b, _ := json.Marshal(resp)
-		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		_ = conn.WriteMessage(websocket.TextMessage, b)
+	// Audit terminal session start
+	actor, _ := c.Get("actor")
+	actorStr := "admin"
+	if s, ok := actor.(string); ok && s != "" {
+		actorStr = s
+	}
+	logger.Info("terminal", "system", fmt.Sprintf("%s started interactive PTY server terminal session", actorStr), store.Map{})
+
+	// Spawn real PTY process (prefer bash, fallback to sh)
+	shell := "/bin/sh"
+	if _, err := exec.LookPath("bash"); err == nil {
+		shell = "bash"
 	}
 
-	// Send initial welcome message
-	sendMsg(terminalResp{
-		Type: "info",
-		Data: "\x1b[1;34m================================================================================\x1b[0m\r\n" +
-			"\x1b[1;32m CleverRoute Control Plane — Interactive Web Terminal v1.0\x1b[0m\r\n" +
-			"\x1b[1;34m================================================================================\x1b[0m\r\n" +
-			"Type any shell command (e.g. \x1b[36mdocker ps\x1b[0m, \x1b[36mdf -h\x1b[0m, \x1b[36mfree -m\x1b[0m, \x1b[36mps aux\x1b[0m) and press Enter.\r\n\r\n",
-	})
+	cmd := exec.Command(shell)
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
-	// Set keepalive
+	ptyFile, err := pty.Start(cmd)
+	if err != nil {
+		log.Printf("[ws-terminal] pty.Start error: %v", err)
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("\r\n\x1b[31mFailed to start PTY shell: %v\x1b[0m\r\n", err)))
+		return
+	}
+	defer func() {
+		_ = ptyFile.Close()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}()
+
+	// Set initial window size
+	_ = pty.Setsize(ptyFile, &pty.Winsize{Rows: 24, Cols: 80})
+
+	var writeMu sync.Mutex
+	writeWS := func(msgType int, data []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		return conn.WriteMessage(msgType, data)
+	}
+
+	// Goroutine 1: Read raw PTY output and stream to WebSocket client
+	go func() {
+		buf := make([]byte, 8192)
+		for {
+			n, err := ptyFile.Read(buf)
+			if n > 0 {
+				if err := writeWS(websocket.TextMessage, buf[:n]); err != nil {
+					return
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					log.Printf("[ws-terminal] pty read error: %v", err)
+				}
+				return
+			}
+		}
+	}()
+
+	// Keepalive ticker
+	ticker := time.NewTicker(25 * time.Second)
+	defer ticker.Stop()
+
+	go func() {
+		for range ticker.C {
+			if err := writeWS(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Goroutine 2: Read WebSocket messages and write directly to PTY stdin or resize PTY
 	conn.SetReadLimit(64 * 1024)
 	_ = conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 	conn.SetPongHandler(func(string) error {
@@ -73,95 +122,23 @@ func (a *API) wsTerminal(c *gin.Context) {
 		return nil
 	})
 
-	// Heartbeat ticker
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	go func() {
-		for range ticker.C {
-			writeMu.Lock()
-			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			err := conn.WriteMessage(websocket.PingMessage, nil)
-			writeMu.Unlock()
-			if err != nil {
-				return
-			}
-		}
-	}()
-
 	for {
-		_, msg, err := conn.ReadMessage()
+		msgType, msg, err := conn.ReadMessage()
 		if err != nil {
 			break
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(120 * time.Second))
 
-		var req terminalReq
-		if err := json.Unmarshal(msg, &req); err != nil {
-			// Treat raw string as command
-			req.Cmd = string(msg)
-		}
-
-		cmdStr := strings.TrimSpace(req.Cmd)
-		if cmdStr == "" {
-			continue
-		}
-
-		// Audit execution
-		actor, _ := c.Get("actor")
-		actorStr := "admin"
-		if s, ok := actor.(string); ok && s != "" {
-			actorStr = s
-		}
-
-		logger.Info("terminal", "system", fmt.Sprintf("%s executed terminal command: %s", actorStr, cmdStr), store.Map{"cmd": cmdStr})
-
-		// Execute command in sub-shell
-		execCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-
-		var cmd *exec.Cmd
-		if req.Cwd != "" {
-			cmd = exec.CommandContext(execCtx, "/bin/sh", "-c", cmdStr)
-			cmd.Dir = req.Cwd
-		} else {
-			cmd = exec.CommandContext(execCtx, "/bin/sh", "-c", cmdStr)
-		}
-
-		var stdoutBuf, stderrBuf bytes.Buffer
-		cmd.Stdout = &stdoutBuf
-		cmd.Stderr = &stderrBuf
-
-		err = cmd.Run()
-		cancel()
-
-		exitCode := 0
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			} else {
-				exitCode = 1
+		if msgType == websocket.TextMessage || msgType == websocket.BinaryMessage {
+			// Check if message is JSON resize payload
+			var rmsg resizeMsg
+			if err := json.Unmarshal(msg, &rmsg); err == nil && rmsg.Type == "resize" && rmsg.Cols > 0 && rmsg.Rows > 0 {
+				_ = pty.Setsize(ptyFile, &pty.Winsize{Rows: rmsg.Rows, Cols: rmsg.Cols})
+				continue
 			}
-		}
 
-		if stdoutBuf.Len() > 0 {
-			sendMsg(terminalResp{
-				Type: "stdout",
-				Cmd:  cmdStr,
-				Data: stdoutBuf.String(),
-			})
+			// Write input bytes directly to PTY stdin
+			_, _ = ptyFile.Write(msg)
 		}
-		if stderrBuf.Len() > 0 {
-			sendMsg(terminalResp{
-				Type: "stderr",
-				Cmd:  cmdStr,
-				Data: stderrBuf.String(),
-			})
-		}
-
-		sendMsg(terminalResp{
-			Type:     "exit",
-			Cmd:      cmdStr,
-			ExitCode: exitCode,
-		})
 	}
 }

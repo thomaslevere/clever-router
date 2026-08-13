@@ -75,6 +75,16 @@ Note: Docker-socket sibling containers require a real Docker daemon (local dev:
 use the host socket). On Clever Cloud set `CC_MOUNT_DOCKER_SOCKET=true`.
 
 ## Deploy to Clever Cloud
+
+> See the complete AI deployment playbook in [.skills/clever-cloud-deploy/SKILL.md](file:///.skills/clever-cloud-deploy/SKILL.md).
+
+### Automated Setup
+```bash
+./deploy/setup-clever-cloud.sh clever-router clever-router
+git push origin main
+```
+
+### Manual Setup
 ```bash
 clever create --type docker clever-route
 clever domain add my-domain.com
@@ -90,8 +100,8 @@ clever env set CC_DOCKER_EXPOSED_HTTP_PORT 8080
 clever env set CC_HEALTH_CHECK_PATH /healthz
 clever env set CC_MOUNT_DOCKER_SOCKET true
 clever env set ENCRYPTION_KEY "$(openssl rand -hex 32)"
-clever env set ADMIN_API_KEY "$(openssl rand -hex 32)"
-clever env set ALLOWED_IMAGES "diegosouzapw/omniroute:latest"
+clever env set ADMIN_API_KEY "$(openssl rand -hex 24)"
+clever env set ALLOWED_IMAGES "diegosouzapw/omniroute:latest,ghcr.io/berriai/litellm:main-stable"
 
 git push clever master
 ```

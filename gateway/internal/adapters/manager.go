@@ -183,10 +183,9 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 			PidsLimit: &pidsLimit,
 		},
 	}
-	// GAP-1 FIX: attach to our isolated network rather than the default bridge.
 	netCfg := &network.NetworkingConfig{
 		EndpointsConfig: map[string]*network.EndpointSettings{
-			networkName: {},
+			"bridge": {},
 		},
 	}
 
@@ -362,37 +361,21 @@ func (m *Manager) stopAndRemove(ctx context.Context, r *store.Router, strict boo
 	return nil
 }
 
-// resolveAddr returns the container's published host port address or IP on clever-route-net.
+// resolveAddr returns the container's IP on the default bridge network.
 func (m *Manager) resolveAddr(ctx context.Context, containerID string, port int) (string, error) {
 	insp, err := m.docker.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return "", err
 	}
-	internalPort := nat.Port(fmt.Sprintf("%d/tcp", port))
 
-	// 1. Prefer published host port binding on 127.0.0.1 (essential for Docker socket/containerized control planes)
-	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
-		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok && len(bindings) > 0 {
-			for _, b := range bindings {
-				if b.HostPort != "" {
-					hostIP := b.HostIP
-					if hostIP == "" || hostIP == "0.0.0.0" {
-						hostIP = "127.0.0.1"
-					}
-					return fmt.Sprintf("http://%s:%s", hostIP, b.HostPort), nil
-				}
-			}
-		}
-	}
-
-	// 2. Fallback to container network IP
 	ip := ""
 	if insp.NetworkSettings != nil {
-		// Prefer our dedicated network.
-		if n, ok := insp.NetworkSettings.Networks[networkName]; ok && n.IPAddress != "" {
+		if n, ok := insp.NetworkSettings.Networks["bridge"]; ok && n.IPAddress != "" {
 			ip = n.IPAddress
 		}
-		// Fallback: any non-empty IP from any attached network.
+		if ip == "" && insp.NetworkSettings.IPAddress != "" {
+			ip = insp.NetworkSettings.IPAddress
+		}
 		if ip == "" {
 			for _, n := range insp.NetworkSettings.Networks {
 				if n.IPAddress != "" {
@@ -402,9 +385,9 @@ func (m *Manager) resolveAddr(ctx context.Context, containerID string, port int)
 			}
 		}
 	}
+
 	if ip == "" {
-		return "", fmt.Errorf("no network IP or port binding for container %s (attached networks: %v)",
-			containerID, networkNames(insp.NetworkSettings))
+		return "", fmt.Errorf("no network IP for container %s", containerID)
 	}
 	return fmt.Sprintf("http://%s:%d", ip, port), nil
 }

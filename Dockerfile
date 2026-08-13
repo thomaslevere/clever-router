@@ -26,21 +26,26 @@ ENV DEBIAN_FRONTEND=noninteractive \
     APP_ENV=production \
     HOSTNAME=127.0.0.1
 
+# Install base Ubuntu system tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
     ca-certificates \
+    curl \
     wget \
     tini \
     bash \
     procps \
     iputils-ping \
-    docker.io \
     htop \
     git \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
+    xz-utils \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Install official Node 20.x runtime directly into /usr/local
+RUN curl -fsSL https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz | tar -xJ -C /usr/local --strip-components=1
+
+# Install official Docker CLI binary directly into /usr/local/bin
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-24.0.7.tgz | tar -xz -C /usr/local/bin --strip-components=1 docker/docker
 
 WORKDIR /app
 # Static Go gateway (single public listener on :8080)

@@ -1,0 +1,52 @@
+# Local development dependencies for CleverRoute.
+# Run: docker compose up -d
+# Then start the gateway (go run ./cmd/server) and admin (npm run dev) against these.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: clever
+      POSTGRES_PASSWORD: clever
+      POSTGRES_DB: cleverroute
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clever"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      # L-2 FIX: persist Redis state across docker compose down/up so the
+      # hot routing table and rate-limit counters survive restarts locally.
+      - redisdata:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # MinIO stands in for Clever Cloud Cellar (S3) locally for snapshot/restore.
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: clever
+      MINIO_ROOT_PASSWORD: cleversecret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

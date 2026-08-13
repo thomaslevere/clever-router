@@ -1,0 +1,626 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/clever-route/gateway/internal/adapters"
+	"github.com/clever-route/gateway/internal/cache"
+	"github.com/clever-route/gateway/internal/config"
+	"github.com/clever-route/gateway/internal/keys"
+	"github.com/clever-route/gateway/internal/proxy"
+	"github.com/clever-route/gateway/internal/router"
+	"github.com/clever-route/gateway/internal/secrets"
+	"github.com/clever-route/gateway/internal/store"
+	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/gin-gonic/gin"
+)
+
+// slugRe validates that a router slug is safe for use as a container name,
+// Docker volume name, and URL path segment.
+// GAP-3 FIX: slugs are used in container names and URL routing — an invalid
+// slug could cause container name injection or routing conflicts.
+var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9\-]{0,61}[a-z0-9]$`)
+
+// reservedSlugs are path prefixes that must never be registered as routers.
+var reservedSlugs = map[string]bool{
+	"admin":   true,
+	"healthz": true,
+	"metrics": true,
+}
+
+func validateSlug(slug string) error {
+	if !slugRe.MatchString(slug) {
+		return fmt.Errorf("slug must be 2–63 lowercase alphanumeric characters or hyphens (e.g. omniroute-prod)")
+	}
+	if reservedSlugs[slug] {
+		return fmt.Errorf("slug %q is reserved", slug)
+	}
+	return nil
+}
+
+type API struct {
+	cfg     *config.Config
+	store   *store.Store
+	cache   *cache.Cache
+	box     *secrets.Box
+	manager *adapters.Manager
+	table   *router.Table
+	rest    *gin.Engine // private engine mounted under /admin/api/*
+}
+
+type Deps struct {
+	Cfg     *config.Config
+	Store   *store.Store
+	Cache   *cache.Cache
+	Box     *secrets.Box
+	Manager *adapters.Manager
+	Table   *router.Table
+}
+
+func New(d Deps) *API {
+	return &API{cfg: d.Cfg, store: d.Store, cache: d.Cache, box: d.Box, manager: d.Manager, table: d.Table}
+}
+
+// Register mounts every route on the engine: health, the admin UI
+// reverse-proxy, the admin REST API (dispatched through a private engine to
+// avoid gin catch-all/static conflicts), and the namespaced AI proxy.
+func (a *API) Register(r *gin.Engine) {
+	r.GET("/healthz", a.healthz)
+
+	// Admin UI (Next.js) reverse-proxied to the in-container :3000. /admin/api/*
+	// requests are dispatched to the REST engine below before reaching the UI.
+	r.Any("/admin", a.adminRoot)
+	r.Any("/admin/*any", a.adminRoot)
+
+	// Private REST engine. Routes are registered at its root and dispatched by
+	// adminRoot after stripping the /admin/api prefix — this keeps the public
+	// /admin/*any catch-all conflict-free with gin's radix tree.
+	rest := gin.New()
+	rest.Use(gin.Recovery(), a.adminAuth())
+	a.registerAdmin(rest.Group("/"))
+	a.rest = rest
+
+	// Namespaced AI proxy: /{slug}/v1/... and /{slug}/{native}/...
+	p := proxy.New(a.table, keys.NewAuth(a.store, a.cache), a.store)
+	r.Any("/:slug/*path", p.Handle)
+}
+
+// adminRoot routes /admin/api/* to the private REST engine and everything else
+// under /admin to the Next.js UI reverse proxy.
+func (a *API) adminRoot(c *gin.Context) {
+	p := c.Request.URL.Path
+	if p == "/admin/api" || strings.HasPrefix(p, "/admin/api/") {
+		rest := strings.TrimPrefix(p, "/admin/api")
+		if rest == "" {
+			rest = "/"
+		}
+		orig := c.Request.URL.Path
+		origRaw := c.Request.URL.RawPath
+		c.Request.URL.Path = rest
+		c.Request.URL.RawPath = ""
+		a.rest.HandleContext(c)
+		c.Request.URL.Path = orig
+		c.Request.URL.RawPath = origRaw
+		return
+	}
+	a.adminUI(c)
+}
+
+func (a *API) registerAdmin(g *gin.RouterGroup) {
+	// Router CRUD
+	g.GET("/routers", a.listRouters)
+	g.POST("/routers", a.createRouter)
+	g.GET("/routers/:id", a.getRouter)
+	g.PATCH("/routers/:id", a.updateRouter)
+	g.DELETE("/routers/:id", a.deleteRouter)
+
+	// Router lifecycle
+	g.POST("/routers/:id/start", a.startRouter)
+	g.POST("/routers/:id/stop", a.stopRouter)
+	g.POST("/routers/:id/restart", a.restartRouter)
+	g.POST("/routers/:id/discover", a.discoverRouter)
+	g.GET("/routers/:id/health", a.healthRouter)
+	g.GET("/routers/:id/models", a.listModels)
+	g.GET("/routers/:id/logs", a.logsRouter)
+
+	// Credentials — GAP-5 FIX: scoped under /routers/:id/credentials/:provider
+	// for consistent REST semantics and traceable audit entries.
+	g.GET("/routers/:id/credentials", a.listCredentials)
+	g.PUT("/routers/:id/credentials/:provider", a.putCredential)
+	g.DELETE("/routers/:id/credentials/:provider", a.deleteCredential)
+
+	// Virtual keys
+	g.GET("/keys", a.listKeys)
+	g.POST("/keys", a.createKey)
+	g.POST("/keys/:id/revoke", a.revokeKey)
+
+	// Audit + system
+	g.GET("/audit", a.listAudit)
+	g.GET("/system", a.systemInfo)
+}
+
+// ----- middleware -----
+
+func (a *API) adminAuth() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if a.cfg.IsDev() && c.GetHeader("X-Dev-Bypass") == "1" {
+			c.Set("actor", "dev")
+			c.Next()
+			return
+		}
+		tok := strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer ")
+		if tok == "" || tok != a.cfg.AdminToken {
+			c.AbortWithStatusJSON(401, gin.H{"error": "unauthorized"})
+			return
+		}
+		c.Set("actor", "admin")
+		c.Next()
+	}
+}
+
+// ----- health -----
+
+func (a *API) healthz(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+	pgOK := a.store.Ping(ctx) == nil
+	rdOK := a.cache.Ping(ctx) == nil
+	if !pgOK || !rdOK {
+		c.JSON(503, gin.H{"status": "unhealthy", "postgres": pgOK, "redis": rdOK})
+		return
+	}
+	c.JSON(200, gin.H{"status": "healthy", "postgres": pgOK, "redis": rdOK, "routers": len(a.table.Snapshot())})
+}
+
+// ----- admin UI reverse proxy -----
+
+func (a *API) adminUI(c *gin.Context) {
+	target, err := url.Parse("http://" + a.cfg.AdminInternalAddr)
+	if err != nil {
+		c.String(500, "bad admin addr")
+		return
+	}
+	p := httputil.NewSingleHostReverseProxy(target)
+	p.Director = func(req *http.Request) {
+		req.URL.Scheme = target.Scheme
+		req.URL.Host = target.Host
+		req.Host = target.Host
+	}
+	p.ServeHTTP(c.Writer, c.Request)
+}
+
+// ----- routers -----
+
+type createRouterReq struct {
+	Slug           string    `json:"slug" binding:"required"`
+	Name           string    `json:"name" binding:"required"`
+	AdapterType    string    `json:"adapter_type" binding:"required"`
+	ImageRef       string    `json:"image_ref" binding:"required"`
+	DesiredVersion string    `json:"desired_version"`
+	EndpointPath   string    `json:"endpoint_path"`
+	DesiredState   string    `json:"desired_state"`
+	Config         store.Map `json:"config"`
+}
+
+func (a *API) listRouters(c *gin.Context) {
+	rs, err := a.store.ListRouters(c)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, rs)
+}
+
+func (a *API) createRouter(c *gin.Context) {
+	var req createRouterReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	// GAP-3 FIX: validate slug before writing to DB or passing to Docker.
+	if err := validateSlug(req.Slug); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.EndpointPath == "" {
+		req.EndpointPath = "/" + req.Slug
+	}
+	if req.DesiredVersion == "" {
+		req.DesiredVersion = "latest"
+	}
+	if req.DesiredState == "" {
+		req.DesiredState = "stopped"
+	}
+	if req.Config == nil {
+		req.Config = store.Map{}
+	}
+	r := &store.Router{
+		Slug: req.Slug, Name: req.Name, AdapterType: req.AdapterType, ImageRef: req.ImageRef,
+		DesiredVersion: req.DesiredVersion, EndpointPath: req.EndpointPath,
+		DesiredState: req.DesiredState, Config: req.Config,
+	}
+	if err := a.store.CreateRouter(c, r); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	a.audit(c, "router.create", "router", r.ID, nil, store.Map{"slug": r.Slug, "adapter": r.AdapterType, "image": r.ImageRef})
+	c.JSON(201, r)
+}
+
+func (a *API) getRouter(c *gin.Context) {
+	r, err := a.store.GetRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	c.JSON(200, r)
+}
+
+func (a *API) updateRouter(c *gin.Context) {
+	var req struct {
+		Name   string    `json:"name"`
+		Config store.Map `json:"config"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	before, _ := a.store.GetRouter(c, c.Param("id"))
+	if err := a.store.UpdateRouter(c, c.Param("id"), req.Name, req.Config); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	a.audit(c, "router.update", "router", c.Param("id"), before, store.Map{"name": req.Name, "config": req.Config})
+	c.JSON(200, gin.H{"ok": true})
+}
+
+func (a *API) deleteRouter(c *gin.Context) {
+	r, err := a.store.GetRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	if r.DesiredState == "running" || r.RuntimeState == "running" {
+		_ = a.manager.Stop(c, r)
+	}
+	if err := a.store.DeleteRouter(c, c.Param("id")); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	a.audit(c, "router.delete", "router", c.Param("id"), r, nil)
+	c.JSON(200, gin.H{"ok": true})
+}
+
+func (a *API) startRouter(c *gin.Context) {
+	r, err := a.store.GetRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	_ = a.store.SetDesiredState(c, r.ID, "running")
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := a.manager.Start(ctx, r); err != nil {
+			log.Printf("[api] start %s: %v", r.Slug, err)
+		}
+	}()
+	a.audit(c, "router.start", "router", r.ID, nil, nil)
+	c.JSON(202, gin.H{"ok": true, "state": "starting"})
+}
+
+func (a *API) stopRouter(c *gin.Context) {
+	r, err := a.store.GetRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	_ = a.store.SetDesiredState(c, r.ID, "stopped")
+	go func() {
+		if err := a.manager.Stop(context.Background(), r); err != nil {
+			log.Printf("[api] stop %s: %v", r.Slug, err)
+		}
+	}()
+	a.audit(c, "router.stop", "router", r.ID, nil, nil)
+	c.JSON(202, gin.H{"ok": true, "state": "stopping"})
+}
+
+func (a *API) restartRouter(c *gin.Context) {
+	r, err := a.store.GetRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if err := a.manager.Restart(ctx, r); err != nil {
+			log.Printf("[api] restart %s: %v", r.Slug, err)
+		}
+	}()
+	a.audit(c, "router.restart", "router", r.ID, nil, nil)
+	c.JSON(202, gin.H{"ok": true, "state": "restarting"})
+}
+
+func (a *API) discoverRouter(c *gin.Context) {
+	r, err := a.store.GetRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	go func() {
+		if err := a.manager.DiscoverModels(context.Background(), r, nil, ""); err != nil {
+			log.Printf("[api] discover %s: %v", r.Slug, err)
+		}
+	}()
+	c.JSON(202, gin.H{"ok": true})
+}
+
+func (a *API) healthRouter(c *gin.Context) {
+	r, err := a.store.GetRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	err = a.manager.HealthCheck(c, r)
+	if err != nil {
+		c.JSON(200, gin.H{"status": "unhealthy", "detail": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"status": "healthy"})
+}
+
+func (a *API) listModels(c *gin.Context) {
+	ms, err := a.store.ListModels(c, c.Param("id"))
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, ms)
+}
+
+// logsRouter streams container logs to the client.
+// L-7 FIX: Docker container logs use a multiplexed format (8-byte header per
+// frame). The previous implementation forwarded raw bytes, producing garbage
+// binary prefixes in the browser. stdcopy.StdCopy demultiplexes stdout/stderr
+// and writes clean UTF-8 lines to the pipe consumed by the SSE stream.
+func (a *API) logsRouter(c *gin.Context) {
+	r, err := a.store.GetRouter(c, c.Param("id"))
+	if err != nil || r.ContainerID == "" {
+		c.JSON(404, gin.H{"error": "router not running"})
+		return
+	}
+	rc, err := a.manager.Logs(c, r, true)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	defer rc.Close()
+
+	// Demultiplex Docker's multiplexed log stream into a clean pipe.
+	pr, pw := io.Pipe()
+	go func() {
+		defer pw.Close()
+		_, _ = stdcopy.StdCopy(pw, pw, rc)
+	}()
+
+	c.Header("Content-Type", "text/plain; charset=utf-8")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Stream(func(w io.Writer) bool {
+		buf := make([]byte, 4096)
+		n, err := pr.Read(buf)
+		if err != nil {
+			return false
+		}
+		_, _ = w.Write(buf[:n])
+		return true
+	})
+}
+
+// ----- credentials -----
+
+type putCredentialReq struct {
+	Key      string    `json:"key" binding:"required"`
+	Metadata store.Map `json:"metadata"`
+}
+
+func (a *API) listCredentials(c *gin.Context) {
+	creds, err := a.store.ListCredentials(c, c.Param("id"))
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	out := make([]gin.H, len(creds))
+	for i, cr := range creds {
+		out[i] = gin.H{"id": cr.ID, "provider": cr.Provider, "metadata": cr.Metadata,
+			"last_verified_at": cr.LastVerifiedAt, "created_at": cr.CreatedAt}
+	}
+	c.JSON(200, out)
+}
+
+func (a *API) putCredential(c *gin.Context) {
+	var req putCredentialReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	ct, err := a.box.Encrypt([]byte(req.Key))
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Metadata == nil {
+		req.Metadata = store.Map{}
+	}
+	cred := &store.ProviderCredential{
+		RouterID: c.Param("id"), Provider: c.Param("provider"), Ciphertext: ct,
+		KeyID: a.box.KeyID(), Metadata: req.Metadata,
+	}
+	if err := a.store.SaveCredential(c, cred); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	a.audit(c, "credential.save", "router", c.Param("id"), nil, store.Map{"provider": c.Param("provider")})
+	c.JSON(201, gin.H{"ok": true, "provider": c.Param("provider")})
+}
+
+// deleteCredential removes a credential by router ID + provider name.
+// GAP-5 FIX: Route is now DELETE /routers/:id/credentials/:provider, which is
+// semantically correct (the resource is identified by router+provider pair).
+func (a *API) deleteCredential(c *gin.Context) {
+	if err := a.store.DeleteCredentialByProvider(c, c.Param("id"), c.Param("provider")); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	a.audit(c, "credential.delete", "router", c.Param("id"), nil, store.Map{"provider": c.Param("provider")})
+	c.JSON(200, gin.H{"ok": true})
+}
+
+// ----- virtual keys -----
+
+type createKeyReq struct {
+	Name         string   `json:"name" binding:"required"`
+	BudgetCents  int64    `json:"budget_cents"`
+	RateLimitRPM int      `json:"rate_limit_rpm"`
+	ModelAllow   []string `json:"model_allowlist"`
+	RouterAllow  []string `json:"router_allowlist"`
+}
+
+func (a *API) listKeys(c *gin.Context) {
+	ks, err := a.store.ListVirtualKeys(c)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, ks)
+}
+
+func (a *API) createKey(c *gin.Context) {
+	var req createKeyReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	plain, err := keys.Generate()
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	if req.ModelAllow == nil {
+		req.ModelAllow = []string{}
+	}
+	if req.RouterAllow == nil {
+		req.RouterAllow = []string{}
+	}
+	k := &store.VirtualKey{
+		KeyHash: keys.HashKey(plain), Name: req.Name, Prefix: "cr",
+		BudgetCents: req.BudgetCents, RateLimitRPM: req.RateLimitRPM,
+		ModelAllow: req.ModelAllow, RouterAllow: req.RouterAllow,
+	}
+	if err := a.store.CreateVirtualKey(c, k); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	a.audit(c, "key.create", "virtual_key", k.ID, nil, store.Map{"name": k.Name})
+	c.JSON(201, gin.H{"id": k.ID, "key": plain, "name": k.Name,
+		"budget_cents": k.BudgetCents, "rate_limit_rpm": k.RateLimitRPM,
+		"model_allowlist": k.ModelAllow, "router_allowlist": k.RouterAllow})
+}
+
+func (a *API) revokeKey(c *gin.Context) {
+	if err := a.store.RevokeVirtualKey(c, c.Param("id")); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	a.audit(c, "key.revoke", "virtual_key", c.Param("id"), nil, nil)
+	c.JSON(200, gin.H{"ok": true})
+}
+
+// ----- audit / system -----
+
+// listAudit returns recent audit log entries.
+// GAP-4 FIX: no longer calls store.Pool.Query directly — uses the proper
+// store.ListAuditLog() method which keeps the Pool encapsulated.
+func (a *API) listAudit(c *gin.Context) {
+	entries, err := a.store.ListAuditLog(c, 200)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, entries)
+}
+
+// systemInfo returns runtime metadata about the control plane.
+// L-8 IMPROVEMENT: now includes Cellar configuration presence and a summary of
+// serving vs total routers for better operational visibility.
+func (a *API) systemInfo(c *gin.Context) {
+	snap := a.table.Snapshot()
+	serving := len(snap)
+
+	routers, _ := a.store.ListRouters(c)
+	total := len(routers)
+	healthy := 0
+	for _, r := range routers {
+		if r.HealthStatus == "healthy" {
+			healthy++
+		}
+	}
+
+	cellarConfigured := a.cfg.Cellar.Endpoint != "" &&
+		a.cfg.Cellar.AccessKey != "" &&
+		a.cfg.Cellar.SecretKey != ""
+
+	c.JSON(200, gin.H{
+		"environment":        a.cfg.Environment,
+		"allowed_images":     a.cfg.AllowedImages,
+		"routers_total":      total,
+		"routers_serving":    serving,
+		"routers_healthy":    healthy,
+		"cellar_configured":  cellarConfigured,
+		"admin_internal_addr": a.cfg.AdminInternalAddr,
+	})
+}
+
+// ----- helpers -----
+
+func (a *API) audit(c *gin.Context, action, targetType, targetID string, before, after any) {
+	actor, _ := c.Get("actor")
+	actorStr := "admin"
+	if s, ok := actor.(string); ok && s != "" {
+		actorStr = s
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = a.store.Audit(ctx, actorStr, action, targetType, targetID, toMap(before), toMap(after))
+}
+
+func toMap(v any) store.Map {
+	if v == nil {
+		return nil
+	}
+	if m, ok := v.(store.Map); ok {
+		return m
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return store.Map{"_raw": "serialization error"}
+	}
+	var out store.Map
+	if json.Unmarshal(b, &out) == nil {
+		return out
+	}
+	return store.Map{"_raw": string(b)}
+}

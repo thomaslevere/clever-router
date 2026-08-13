@@ -1,0 +1,21 @@
+# Go
+gateway/gateway
+gateway/dist/
+*.exe
+*.test
+*.out
+
+# Node / Next
+admin/node_modules/
+admin/.next/
+admin/out/
+
+# Env / local
+.env
+.env.local
+*.local
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

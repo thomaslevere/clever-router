@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -172,7 +173,7 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 		AutoRemove:    false,
 		PortBindings: nat.PortMap{
 			nat.Port(internalPortStr): []nat.PortBinding{
-				{HostIP: "127.0.0.1", HostPort: ""},
+				{HostIP: "0.0.0.0", HostPort: ""},
 			},
 		},
 		// GAP-2 FIX: enforce resource limits to prevent a runaway container
@@ -361,35 +362,67 @@ func (m *Manager) stopAndRemove(ctx context.Context, r *store.Router, strict boo
 	return nil
 }
 
-// resolveAddr returns the container's IP on the default bridge network.
+func hostPortFromURL(u string) string {
+	s := strings.TrimPrefix(u, "http://")
+	s = strings.TrimPrefix(s, "https://")
+	if i := strings.Index(s, "/"); i >= 0 {
+		s = s[:i]
+	}
+	return s
+}
+
+// resolveAddr probes published host ports and container IPs, returning the first reachable address.
 func (m *Manager) resolveAddr(ctx context.Context, containerID string, port int) (string, error) {
 	insp, err := m.docker.ContainerInspect(ctx, containerID)
 	if err != nil {
 		return "", err
 	}
 
-	ip := ""
-	if insp.NetworkSettings != nil {
-		if n, ok := insp.NetworkSettings.Networks["bridge"]; ok && n.IPAddress != "" {
-			ip = n.IPAddress
-		}
-		if ip == "" && insp.NetworkSettings.IPAddress != "" {
-			ip = insp.NetworkSettings.IPAddress
-		}
-		if ip == "" {
-			for _, n := range insp.NetworkSettings.Networks {
-				if n.IPAddress != "" {
-					ip = n.IPAddress
-					break
+	internalPort := nat.Port(fmt.Sprintf("%d/tcp", port))
+	var candidates []string
+
+	// 1. Published host ports (0.0.0.0 binding)
+	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
+		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok && len(bindings) > 0 {
+			for _, b := range bindings {
+				if b.HostPort != "" {
+					candidates = append(candidates, fmt.Sprintf("http://127.0.0.1:%s", b.HostPort))
+					candidates = append(candidates, fmt.Sprintf("http://172.17.0.1:%s", b.HostPort))
+					candidates = append(candidates, fmt.Sprintf("http://172.18.0.1:%s", b.HostPort))
 				}
 			}
 		}
 	}
 
-	if ip == "" {
-		return "", fmt.Errorf("no network IP for container %s", containerID)
+	// 2. Direct container IPs
+	if insp.NetworkSettings != nil {
+		if n, ok := insp.NetworkSettings.Networks["bridge"]; ok && n.IPAddress != "" {
+			candidates = append(candidates, fmt.Sprintf("http://%s:%d", n.IPAddress, port))
+		}
+		if insp.NetworkSettings.IPAddress != "" {
+			candidates = append(candidates, fmt.Sprintf("http://%s:%d", insp.NetworkSettings.IPAddress, port))
+		}
+		for _, n := range insp.NetworkSettings.Networks {
+			if n.IPAddress != "" {
+				candidates = append(candidates, fmt.Sprintf("http://%s:%d", n.IPAddress, port))
+			}
+		}
 	}
-	return fmt.Sprintf("http://%s:%d", ip, port), nil
+
+	// Dynamic TCP reachability probe: return first address accepting TCP connections
+	for _, cand := range candidates {
+		hp := hostPortFromURL(cand)
+		conn, err := net.DialTimeout("tcp", hp, 300*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return cand, nil
+		}
+	}
+
+	if len(candidates) > 0 {
+		return candidates[0], nil
+	}
+	return "", fmt.Errorf("no address resolved for container %s", containerID)
 }
 
 func networkNames(ns *dockertypes.NetworkSettings) []string {

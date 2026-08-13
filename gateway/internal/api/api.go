@@ -125,10 +125,13 @@ func (a *API) adminRoot(c *gin.Context) {
 		if rest == "" {
 			rest = "/"
 		}
-		req := c.Request.Clone(c.Request.Context())
-		req.URL.Path = rest
-		req.URL.RawPath = ""
-		a.rest.ServeHTTP(c.Writer, req)
+		origPath := c.Request.URL.Path
+		origRawPath := c.Request.URL.RawPath
+		c.Request.URL.Path = rest
+		c.Request.URL.RawPath = ""
+		a.rest.ServeHTTP(c.Writer, c.Request)
+		c.Request.URL.Path = origPath
+		c.Request.URL.RawPath = origRawPath
 		c.Abort()
 		return
 	}

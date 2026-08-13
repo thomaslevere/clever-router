@@ -84,9 +84,9 @@ func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []stri
 // Overridable via router config["resource_limits"].
 func (OmniRouteAdapter) ResourceLimits(r *store.Router) ContainerResources {
 	res := ContainerResources{
-		MemoryBytes: 512 * 1024 * 1024, // 512 MB
-		NanoCPUs:    1_000_000_000,      // 1 CPU
-		PidsLimit:   256,
+		MemoryBytes: 4 * 1024 * 1024 * 1024, // 4 GB RAM
+		NanoCPUs:    4_000_000_000,           // 4 CPUs
+		PidsLimit:   1024,
 	}
 	if lim, ok := r.Config["resource_limits"].(map[string]any); ok {
 		if mb, ok := lim["memory_mb"].(float64); ok && mb > 0 {

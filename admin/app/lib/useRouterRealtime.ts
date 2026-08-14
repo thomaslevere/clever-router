@@ -202,8 +202,11 @@ export function useRouterRealtime(routerId: string, initialRouter: Router | null
     return () => clearInterval(t);
   }, [routerId]);
 
-  // Interactive Action Handlers
+  // Interactive Action Handlers with Debounce Lock
   const handleStart = async () => {
+    if (state.busyAction || state.runtimeState === "starting" || state.runtimeState === "running") {
+      return;
+    }
     setState((prev) => ({
       ...prev,
       busyAction: "start",
@@ -223,6 +226,9 @@ export function useRouterRealtime(routerId: string, initialRouter: Router | null
   };
 
   const handleRestart = async () => {
+    if (state.busyAction || state.runtimeState === "starting" || state.runtimeState === "stopping") {
+      return;
+    }
     setState((prev) => ({
       ...prev,
       busyAction: "restart",
@@ -241,6 +247,9 @@ export function useRouterRealtime(routerId: string, initialRouter: Router | null
   };
 
   const handleStop = async () => {
+    if (state.busyAction || state.runtimeState === "stopping" || state.runtimeState === "stopped") {
+      return;
+    }
     setState((prev) => ({
       ...prev,
       busyAction: "stop",
@@ -259,6 +268,9 @@ export function useRouterRealtime(routerId: string, initialRouter: Router | null
   };
 
   const handleDiscover = async () => {
+    if (state.busyAction === "discover") {
+      return;
+    }
     setState((prev) => ({
       ...prev,
       busyAction: "discover",

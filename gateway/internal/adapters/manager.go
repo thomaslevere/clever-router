@@ -47,12 +47,13 @@ type Manager struct {
 	reg        *Registry
 	allowed    map[string]bool
 	table      *router.Table
-	bridge     *storage.FastVolumeBridge
-	scratchDir string
-	watchersMu sync.Mutex
-	watchers   map[string][]*storage.VolumeWatcher
-	onEventMu  sync.RWMutex
-	onEvent    func(routerID string, eventType string, payload map[string]any)
+	bridge      *storage.FastVolumeBridge
+	scratchDir  string
+	watchersMu  sync.Mutex
+	watchers    map[string][]*storage.VolumeWatcher
+	routerLocks sync.Map
+	onEventMu   sync.RWMutex
+	onEvent     func(routerID string, eventType string, payload map[string]any)
 }
 
 func (m *Manager) SetEventHandler(fn func(routerID string, eventType string, payload map[string]any)) {
@@ -187,15 +188,17 @@ func (m *Manager) InspectImageVolumes(ctx context.Context, imageName string) ([]
 	return nil, nil
 }
 
-// Start provisions/restarts the router's sibling container and wires its route.
+// Start provisions/restarts the router's sibling container and wires its route with idempotency protection.
 func (m *Manager) Start(ctx context.Context, r *store.Router) error {
-	m.emitEvent(r.ID, "state_changed", map[string]any{
-		"status":        "starting",
-		"runtime_state": "starting",
-		"desired_state": "running",
-		"slug":          r.Slug,
-	})
+	val, _ := m.routerLocks.LoadOrStore(r.ID, &sync.Mutex{})
+	mu := val.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
 
+	return m.startLocked(ctx, r, true)
+}
+
+func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExisting bool) error {
 	ad, err := m.reg.Get(r.AdapterType)
 	if err != nil {
 		return fmt.Errorf("unknown adapter %q: %w", r.AdapterType, err)
@@ -203,6 +206,41 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	if !m.imageAllowed(r.ImageRef) {
 		return fmt.Errorf("image %q is not in ALLOWED_IMAGES", r.ImageRef)
 	}
+
+	// Idempotency check: If container is already running and healthy, avoid tearing down live traffic!
+	name := containerPrefix + r.Slug
+	if checkExisting {
+		if existing, err := m.docker.ContainerInspect(ctx, name); err == nil && existing.State != nil && existing.State.Running {
+			if workingAddr, ok := m.checkAnyWorking(ctx, existing.ID, ad.InternalPort(r), ad.HealthPath(r)); ok {
+				log.Printf("[manager] router %s (%s) is already running and healthy at %s. Skipping duplicate start.", r.Slug, existing.ID[:12], workingAddr)
+				endpoint := r.EndpointPath
+				if endpoint == "" {
+					endpoint = "/" + r.Slug
+				}
+				panel := endpoint + ad.NativePanelPath(r)
+				_ = m.store.UpdateRouterState(ctx, r.ID, "running", workingAddr, existing.ID, panel, "healthy")
+				_ = m.cache.SetRoute(ctx, r.Slug, workingAddr)
+				m.table.Set(r.Slug, workingAddr)
+				m.emitEvent(r.ID, "state_changed", map[string]any{
+					"status":           "running",
+					"runtime_state":    "running",
+					"health_status":    "healthy",
+					"desired_state":    "running",
+					"target_addr":      workingAddr,
+					"native_panel_url": panel,
+					"slug":             r.Slug,
+				})
+				return nil
+			}
+		}
+	}
+
+	m.emitEvent(r.ID, "state_changed", map[string]any{
+		"status":        "starting",
+		"runtime_state": "starting",
+		"desired_state": "running",
+		"slug":          r.Slug,
+	})
 
 	// 1. Ensure permanent crypto keys & secrets are saved to DB
 	if savedEnv, modified := ad.EnsurePermanentSecrets(ctx, r, m.box); modified {
@@ -292,7 +330,7 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	lim := ad.ResourceLimits(&localForStart)
 	pidsLimit := lim.PidsLimit
 
-	name := containerPrefix + r.Slug
+	name = containerPrefix + r.Slug
 	internalPort := nat.Port(fmt.Sprintf("%d/tcp", ad.InternalPort(&localForStart)))
 	cfg := &container.Config{
 		Image: r.ImageRef,
@@ -408,6 +446,15 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 
 // Stop removes the router's container and clears its route, flushing volume snapshots to S3.
 func (m *Manager) Stop(ctx context.Context, r *store.Router) error {
+	val, _ := m.routerLocks.LoadOrStore(r.ID, &sync.Mutex{})
+	mu := val.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
+	return m.stopLocked(ctx, r)
+}
+
+func (m *Manager) stopLocked(ctx context.Context, r *store.Router) error {
 	m.emitEvent(r.ID, "state_changed", map[string]any{
 		"status":        "stopping",
 		"runtime_state": "stopping",
@@ -491,10 +538,13 @@ func (m *Manager) StopAll(ctx context.Context) {
 }
 
 func (m *Manager) Restart(ctx context.Context, r *store.Router) error {
-	if err := m.Stop(ctx, r); err != nil {
-		return err
-	}
-	return m.Start(ctx, r)
+	val, _ := m.routerLocks.LoadOrStore(r.ID, &sync.Mutex{})
+	mu := val.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
+	_ = m.stopLocked(ctx, r)
+	return m.startLocked(ctx, r, false)
 }
 
 // Logs returns the raw (multiplexed) container log stream. Callers should
@@ -821,6 +871,26 @@ func countProviders(models []store.Model) int {
 		seen[m.Provider] = true
 	}
 	return len(seen)
+}
+
+func (m *Manager) checkAnyWorking(ctx context.Context, containerID string, port int, healthPath string) (string, bool) {
+	candidates := m.getCandidates(ctx, containerID, port)
+	probeClient := &http.Client{Timeout: 1500 * time.Millisecond}
+	for _, cand := range candidates {
+		url := strings.TrimRight(cand, "/") + healthPath
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err == nil {
+			resp, err := probeClient.Do(req)
+			if err == nil {
+				status := resp.StatusCode
+				resp.Body.Close()
+				if status < 500 {
+					return cand, true
+				}
+			}
+		}
+	}
+	return "", false
 }
 
 func hostOnly(addr string) string {

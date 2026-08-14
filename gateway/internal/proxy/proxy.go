@@ -232,7 +232,10 @@ func (p *Proxy) Handle(c *gin.Context) {
 		for {
 			n, rerr := tee.Read(buf)
 			if n > 0 {
-				c.Writer.Write(buf[:n])
+				if _, werr := c.Writer.Write(buf[:n]); werr != nil {
+					// Client disconnected / pipe broke, stop streaming cleanly
+					break
+				}
 				if flusher != nil {
 					flusher.Flush()
 				}
@@ -244,7 +247,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 	} else {
 		// Non-streaming: buffer, sniff, then write.
 		bufBody, _ := io.ReadAll(io.TeeReader(resp.Body, sc))
-		c.Writer.Write(bufBody)
+		_, _ = c.Writer.Write(bufBody)
 		if flusher != nil {
 			flusher.Flush()
 		}

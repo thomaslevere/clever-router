@@ -275,48 +275,14 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 	}
 
 	var dockerBinds []string
-	var activeWatchers []*storage.VolumeWatcher
-
-	// 3. Hydrate each volume from S3 & attach real-time inotify watcher
 	for _, targetVol := range volumes {
 		sanitized := strings.TrimPrefix(strings.ReplaceAll(targetVol, "/", "_"), "_")
 		if sanitized == "" {
 			sanitized = "data"
 		}
-		localPath := filepath.Join(m.scratchDir, r.ID, sanitized)
-		s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
-
-		ensureWritableRecursive(localPath)
-
-		// Fast Hydration from S3 if bridge is configured
-		if m.bridge != nil {
-			if err := m.bridge.HydrateFromS3(ctx, s3Key, localPath); err != nil {
-				log.Printf("[manager] hydrate warning for %s (%s): %v", r.Slug, s3Key, err)
-			}
-
-			// Attach real-time inotify watcher
-			watcher, err := storage.NewVolumeWatcher(m.bridge, localPath, s3Key, 800*time.Millisecond)
-			if err == nil {
-				watcher.Start(ctx)
-				activeWatchers = append(activeWatchers, watcher)
-			} else {
-				log.Printf("[manager] warning: could not create volume watcher for %s: %v", localPath, err)
-			}
-		}
-		ensureWritableRecursive(localPath)
-
-		dockerBinds = append(dockerBinds, fmt.Sprintf("%s:%s", localPath, targetVol))
+		namedVol := fmt.Sprintf("clever-route-%s-%s", r.ID, sanitized)
+		dockerBinds = append(dockerBinds, fmt.Sprintf("%s:%s", namedVol, targetVol))
 	}
-
-	// Record active watchers for this router ID
-	m.watchersMu.Lock()
-	if oldWatchers, ok := m.watchers[r.ID]; ok {
-		for _, w := range oldWatchers {
-			w.Close()
-		}
-	}
-	m.watchers[r.ID] = activeWatchers
-	m.watchersMu.Unlock()
 
 	creds, err := m.loadCreds(ctx, r)
 	if err != nil {
@@ -379,6 +345,25 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 	if err != nil {
 		return fmt.Errorf("create container: %w", err)
 	}
+
+	// 3. Hydrate state from Cellar S3 directly into container before boot
+	if m.bridge != nil {
+		for _, targetVol := range volumes {
+			sanitized := strings.TrimPrefix(strings.ReplaceAll(targetVol, "/", "_"), "_")
+			if sanitized == "" {
+				sanitized = "data"
+			}
+			s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
+			targetParent := filepath.Dir(targetVol)
+			if targetParent == "" || targetParent == "." {
+				targetParent = "/"
+			}
+			if err := m.bridge.HydrateContainer(ctx, m.docker, created.ID, s3Key, targetParent); err != nil {
+				log.Printf("[manager] hydrate warning for %s (%s): %v", r.Slug, s3Key, err)
+			}
+		}
+	}
+
 	if err := m.docker.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
 		_ = m.docker.ContainerRemove(ctx, created.ID, container.RemoveOptions{Force: true})
 		return fmt.Errorf("start container: %w", err)
@@ -462,45 +447,15 @@ func (m *Manager) stopLocked(ctx context.Context, r *store.Router) error {
 		"slug":          r.Slug,
 	})
 
-	// 1. Stop active file watchers for this router
-	m.watchersMu.Lock()
-	if ws, ok := m.watchers[r.ID]; ok {
-		for _, w := range ws {
-			w.Close()
-		}
-		delete(m.watchers, r.ID)
+	// 1. Snapshot volumes to S3 directly from running container BEFORE stopping
+	if m.bridge != nil && r.ContainerID != "" {
+		_ = m.Snapshot(ctx, r)
 	}
-	m.watchersMu.Unlock()
 
 	// 2. Stop container gracefully with timeout to allow SQLite WAL flush
 	local := *r
 	if err := m.stopAndRemove(ctx, &local, true); err != nil {
 		return err
-	}
-
-	// 3. Final synchronous flush of all volumes to S3
-	if m.bridge != nil {
-		volumes, _ := m.InspectImageVolumes(ctx, r.ImageRef)
-		if len(volumes) == 0 {
-			if ad, err := m.reg.Get(r.AdapterType); err == nil {
-				volumes = ad.DeclaredVolumes(r)
-			}
-		}
-		if len(volumes) == 0 {
-			volumes = []string{"/app/data"}
-		}
-		for _, targetVol := range volumes {
-			sanitized := strings.TrimPrefix(strings.ReplaceAll(targetVol, "/", "_"), "_")
-			if sanitized == "" {
-				sanitized = "data"
-			}
-			localPath := filepath.Join(m.scratchDir, r.ID, sanitized)
-			s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
-			ensureWritableRecursive(localPath)
-			if err := m.bridge.StreamSnapshotToS3(ctx, localPath, s3Key); err != nil {
-				log.Printf("[manager] warning: final snapshot error for %s (%s): %v", r.Slug, s3Key, err)
-			}
-		}
 	}
 
 	_ = m.store.UpdateRouterState(ctx, r.ID, "stopped", "", "", "", "unknown")
@@ -517,6 +472,32 @@ func (m *Manager) stopLocked(ctx context.Context, r *store.Router) error {
 	logger.Info("router", r.Slug, fmt.Sprintf("Router container stopped for %s", r.Slug), store.Map{
 		"slug": r.Slug,
 	})
+	return nil
+}
+
+// Snapshot extracts volume data from running container and streams an archive to Cellar S3.
+func (m *Manager) Snapshot(ctx context.Context, r *store.Router) error {
+	if m.bridge == nil || r.ContainerID == "" {
+		return nil
+	}
+	ad, err := m.reg.Get(r.AdapterType)
+	volumes, _ := m.InspectImageVolumes(ctx, r.ImageRef)
+	if len(volumes) == 0 && err == nil {
+		volumes = ad.DeclaredVolumes(r)
+	}
+	if len(volumes) == 0 {
+		volumes = []string{"/app/data"}
+	}
+	for _, targetVol := range volumes {
+		sanitized := strings.TrimPrefix(strings.ReplaceAll(targetVol, "/", "_"), "_")
+		if sanitized == "" {
+			sanitized = "data"
+		}
+		s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
+		if err := m.bridge.SnapshotContainer(ctx, m.docker, r.ContainerID, targetVol, s3Key); err != nil {
+			log.Printf("[manager] snapshot warning for %s (%s): %v", r.Slug, s3Key, err)
+		}
+	}
 	return nil
 }
 

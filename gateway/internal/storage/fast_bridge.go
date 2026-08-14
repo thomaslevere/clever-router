@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/client"
 	"github.com/klauspost/compress/zstd"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -236,7 +238,7 @@ func (b *FastVolumeBridge) StreamSnapshotToS3(ctx context.Context, sourceDir, s3
 	}
 
 	payload := buf.Bytes()
-	if len(payload) == 0 {
+	if len(payload) == 0 || fileCount == 0 {
 		return nil
 	}
 
@@ -248,5 +250,104 @@ func (b *FastVolumeBridge) StreamSnapshotToS3(ctx context.Context, sourceDir, s3
 	}
 
 	log.Printf("[fast-bridge] streamed snapshot (%d files, %d bytes) -> s3://%s/%s", fileCount, len(payload), b.bucket, s3Key)
+	return nil
+}
+
+// HydrateContainer downloads a .tar.zst snapshot from S3, decompresses it into a tar stream,
+// and copies it directly into the target container directory via Docker API.
+func (b *FastVolumeBridge) HydrateContainer(ctx context.Context, cli *client.Client, containerID, s3Key, targetParentDir string) error {
+	if b.client == nil || cli == nil {
+		return nil
+	}
+	mu := b.getLock(s3Key)
+	mu.Lock()
+	defer mu.Unlock()
+
+	obj, err := b.client.GetObject(ctx, b.bucket, s3Key, minio.GetObjectOptions{})
+	if err != nil {
+		return err
+	}
+	defer obj.Close()
+
+	stat, err := obj.Stat()
+	if err != nil {
+		// Key not found in S3 (fresh boot)
+		return nil
+	}
+	if stat.Size <= 32 { // Empty or header-only archive
+		return nil
+	}
+
+	zr, err := zstd.NewReader(obj)
+	if err != nil {
+		return fmt.Errorf("zstd reader for %s: %w", s3Key, err)
+	}
+	defer zr.Close()
+
+	pr, pw := io.Pipe()
+	go func() {
+		_, copyErr := io.Copy(pw, zr)
+		_ = pw.CloseWithError(copyErr)
+	}()
+
+	err = cli.CopyToContainer(ctx, containerID, targetParentDir, pr, container.CopyToContainerOptions{
+		AllowOverwriteDirWithFile: true,
+	})
+	if err != nil {
+		return fmt.Errorf("docker copy to container %s (%s): %w", containerID[:12], targetParentDir, err)
+	}
+	log.Printf("[fast-bridge] successfully hydrated %s from s3://%s/%s into container %s:%s", s3Key, b.bucket, s3Key, containerID[:12], targetParentDir)
+	return nil
+}
+
+// SnapshotContainer extracts a tar archive from the container directory using Docker API,
+// compresses it with parallel Zstandard, and streams it directly to S3.
+func (b *FastVolumeBridge) SnapshotContainer(ctx context.Context, cli *client.Client, containerID, srcDir, s3Key string) error {
+	if b.client == nil || cli == nil {
+		return nil
+	}
+	mu := b.getLock(s3Key)
+	mu.Lock()
+	defer mu.Unlock()
+
+	reader, _, err := cli.CopyFromContainer(ctx, containerID, srcDir)
+	if err != nil {
+		return fmt.Errorf("docker copy from container %s (%s): %w", containerID[:12], srcDir, err)
+	}
+	defer reader.Close()
+
+	var buf bytes.Buffer
+	zw, err := zstd.NewWriter(&buf, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(0))
+	if err != nil {
+		return fmt.Errorf("create zstd writer: %w", err)
+	}
+
+	written, err := io.Copy(zw, reader)
+	if err != nil {
+		_ = zw.Close()
+		return fmt.Errorf("compress container tar stream: %w", err)
+	}
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("close zstd writer: %w", err)
+	}
+
+	// Avoid overwriting a valid snapshot with an empty one (e.g. empty dir tar <= 512 bytes)
+	if written <= 512 || buf.Len() <= 32 {
+		return nil
+	}
+
+	payload := buf.Bytes()
+	_, err = b.client.PutObject(ctx, b.bucket, s3Key, bytes.NewReader(payload), int64(len(payload)), minio.PutObjectOptions{
+		ContentType: "application/zstd",
+		UserMetadata: map[string]string{
+			"clever-route-container": containerID,
+			"clever-route-path":      srcDir,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("put S3 object %s: %w", s3Key, err)
+	}
+
+	log.Printf("[fast-bridge] streamed snapshot (%d raw bytes -> %d zstd bytes) from container %s:%s -> s3://%s/%s", written, len(payload), containerID[:12], srcDir, b.bucket, s3Key)
 	return nil
 }

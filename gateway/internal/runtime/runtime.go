@@ -118,6 +118,8 @@ func (c *Checker) tick(ctx context.Context) {
 		go func(r store.Router) {
 			if err := c.manager.HealthCheck(ctx, &r); err != nil {
 				log.Printf("[health] %s: %v", r.Slug, err)
+			} else if r.RuntimeState == "running" {
+				_ = c.manager.Snapshot(ctx, &r)
 			}
 		}(r)
 	}

@@ -113,29 +113,53 @@ func (p *Proxy) Handle(c *gin.Context) {
 
 	if !isAdmin {
 		if token == "" {
-			fail(c, 401, "invalid or missing api key")
-			return
-		}
-		var err error
-		ki, err = p.auth.Authenticate(c.Request.Context(), token)
-		if err != nil {
-			switch err {
-			case keys.ErrRateLimited:
-				fail(c, 429, "rate limit exceeded")
-			case keys.ErrRevoked:
-				fail(c, 401, "api key revoked")
-			default:
+			if isWebOrAssetPath(upstreamPath) && targetSlug != "" {
+				// Allow web UI and assets passthrough to router's native server
+			} else {
 				fail(c, 401, "invalid or missing api key")
+				return
 			}
-			return
-		}
-
-		if !keys.AllowRouter(ki.RouterAllow, targetSlug) {
-			fail(c, 403, "key not allowed for router '%s'", targetSlug)
-			return
-		}
-		if err := p.auth.CheckRate(c.Request.Context(), ki.ID, ki.RateLimitRPM); err != nil {
-			fail(c, 429, "rate limit exceeded")
+		} else if strings.HasPrefix(token, "cr-") && p.auth != nil {
+			var err error
+			ki, err = p.auth.Authenticate(c.Request.Context(), token)
+			if err != nil {
+				switch err {
+				case keys.ErrRateLimited:
+					fail(c, 429, "rate limit exceeded")
+				case keys.ErrRevoked:
+					fail(c, 401, "api key revoked")
+				default:
+					fail(c, 401, "invalid or missing api key")
+				}
+				return
+			}
+			if !keys.AllowRouter(ki.RouterAllow, targetSlug) {
+				fail(c, 403, "key not allowed for router '%s'", targetSlug)
+				return
+			}
+			if err := p.auth.CheckRate(c.Request.Context(), ki.ID, ki.RateLimitRPM); err != nil {
+				fail(c, 429, "rate limit exceeded")
+				return
+			}
+		} else if isWebOrAssetPath(upstreamPath) && targetSlug != "" {
+			// Non-virtual key token (e.g. native router Bearer token/cookie) on native dashboard path: passthrough
+		} else if p.auth != nil {
+			var err error
+			ki, err = p.auth.Authenticate(c.Request.Context(), token)
+			if err != nil {
+				fail(c, 401, "invalid or missing api key")
+				return
+			}
+			if !keys.AllowRouter(ki.RouterAllow, targetSlug) {
+				fail(c, 403, "key not allowed for router '%s'", targetSlug)
+				return
+			}
+			if err := p.auth.CheckRate(c.Request.Context(), ki.ID, ki.RateLimitRPM); err != nil {
+				fail(c, 429, "rate limit exceeded")
+				return
+			}
+		} else {
+			fail(c, 401, "invalid or missing api key")
 			return
 		}
 	}
@@ -173,7 +197,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 		fail(c, 500, "build upstream request: %v", err)
 		return
 	}
-	copyHeaders(req.Header, c.Request.Header, true)
+	copyHeaders(req.Header, c.Request.Header)
 	req.Host = ""
 
 	resp, err := p.client.Do(req)
@@ -320,12 +344,39 @@ func fail(c *gin.Context, status int, format string, args ...any) {
 	c.JSON(status, proxyError{Status: status, Error: fmt.Sprintf(format, args...)})
 }
 
-func copyHeaders(dst, src http.Header, skipAuth bool) {
+func isWebOrAssetPath(path string) bool {
+	p := strings.ToLower(path)
+	if strings.HasPrefix(p, "/_next") || strings.HasPrefix(p, "/static") ||
+		strings.HasPrefix(p, "/assets") || strings.HasPrefix(p, "/dashboard") ||
+		strings.HasPrefix(p, "/login") || strings.HasPrefix(p, "/setup") ||
+		strings.HasPrefix(p, "/settings") || strings.HasPrefix(p, "/api/") ||
+		strings.HasPrefix(p, "/trpc") || strings.HasPrefix(p, "/favicon") ||
+		strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") ||
+		strings.HasSuffix(p, ".png") || strings.HasSuffix(p, ".svg") ||
+		strings.HasSuffix(p, ".ico") || strings.HasSuffix(p, ".json") ||
+		strings.HasSuffix(p, ".woff") || strings.HasSuffix(p, ".woff2") ||
+		strings.HasSuffix(p, ".ttf") {
+		return true
+	}
+	return false
+}
+
+func copyHeaders(dst, src http.Header) {
 	for k, vs := range src {
 		if isHop(k) {
 			continue
 		}
-		if skipAuth && strings.EqualFold(k, "Authorization") {
+		// Only strip virtual key headers (cr-...), preserve router's own Bearer tokens/cookies
+		if strings.EqualFold(k, "Authorization") {
+			var keep []string
+			for _, v := range vs {
+				if !strings.HasPrefix(strings.TrimSpace(v), "Bearer cr-") {
+					keep = append(keep, v)
+				}
+			}
+			if len(keep) > 0 {
+				dst[k] = keep
+			}
 			continue
 		}
 		for _, v := range vs {

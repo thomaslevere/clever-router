@@ -163,10 +163,6 @@ func (a *API) Register(r *gin.Engine) {
 	r.Any("/admin", a.adminRoot)
 	r.Any("/admin/*any", a.adminRoot)
 
-	// Direct REST API (/api/*)
-	r.Any("/api", a.apiRoot)
-	r.Any("/api/*any", a.apiRoot)
-
 	// Private REST engine. Routes are registered at its root and dispatched by
 	// adminRoot after stripping the /admin/api prefix — this keeps the public
 	// /admin/*any catch-all conflict-free with gin's radix tree.
@@ -201,23 +197,6 @@ func (a *API) adminRoot(c *gin.Context) {
 		return
 	}
 	a.adminUI(c)
-}
-
-// apiRoot routes /api/* directly to the private REST engine.
-func (a *API) apiRoot(c *gin.Context) {
-	p := c.Request.URL.Path
-	rest := strings.TrimPrefix(p, "/api")
-	if rest == "" {
-		rest = "/"
-	}
-	origPath := c.Request.URL.Path
-	origRawPath := c.Request.URL.RawPath
-	c.Request.URL.Path = rest
-	c.Request.URL.RawPath = ""
-	a.rest.ServeHTTP(c.Writer, c.Request)
-	c.Request.URL.Path = origPath
-	c.Request.URL.RawPath = origRawPath
-	c.Abort()
 }
 
 func (a *API) registerAdmin(g *gin.RouterGroup) {

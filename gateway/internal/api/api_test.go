@@ -134,12 +134,12 @@ func TestAPIRouting(t *testing.T) {
 	r.Use(gin.Recovery())
 	a.Register(r)
 
-	// Test /api/routers endpoint reaches the router
-	req := httptest.NewRequest(http.MethodGet, "/api/routers", nil)
+	// Test /admin/api/routers endpoint reaches the admin REST router
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/routers", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 for unauthenticated /api/routers call, got %d", w.Code)
+		t.Fatalf("expected 401 for unauthenticated /admin/api/routers call, got %d", w.Code)
 	}
 }
 

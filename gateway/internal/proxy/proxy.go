@@ -112,14 +112,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 	}
 
 	if !isAdmin {
-		if token == "" {
-			if isWebOrAssetPath(upstreamPath) && targetSlug != "" {
-				// Allow web UI and assets passthrough to router's native server
-			} else {
-				fail(c, 401, "invalid or missing api key")
-				return
-			}
-		} else if strings.HasPrefix(token, "cr-") && p.auth != nil {
+		if strings.HasPrefix(token, "cr-") && p.auth != nil {
 			var err error
 			ki, err = p.auth.Authenticate(c.Request.Context(), token)
 			if err != nil {
@@ -141,27 +134,12 @@ func (p *Proxy) Handle(c *gin.Context) {
 				fail(c, 429, "rate limit exceeded")
 				return
 			}
-		} else if isWebOrAssetPath(upstreamPath) && targetSlug != "" {
-			// Non-virtual key token (e.g. native router Bearer token/cookie) on native dashboard path: passthrough
-		} else if p.auth != nil {
-			var err error
-			ki, err = p.auth.Authenticate(c.Request.Context(), token)
-			if err != nil {
-				fail(c, 401, "invalid or missing api key")
-				return
-			}
-			if !keys.AllowRouter(ki.RouterAllow, targetSlug) {
-				fail(c, 403, "key not allowed for router '%s'", targetSlug)
-				return
-			}
-			if err := p.auth.CheckRate(c.Request.Context(), ki.ID, ki.RateLimitRPM); err != nil {
-				fail(c, 429, "rate limit exceeded")
-				return
-			}
-		} else {
+		} else if token == "" && !isWebOrAssetPath(upstreamPath) && targetSlug == "" {
 			fail(c, 401, "invalid or missing api key")
 			return
 		}
+		// Native router tokens (e.g. sk-..., bearer tokens, child router API keys) are
+		// preserved in the request and proxied directly to the upstream container.
 	}
 
 	// Set browser session cookies on valid token for subsequent Next.js asset/chunk requests
@@ -204,6 +182,43 @@ func (p *Proxy) Handle(c *gin.Context) {
 	if err != nil {
 		fail(c, http.StatusBadGateway, "upstream unreachable: %v", err)
 		return
+	}
+
+	// Automatic API Path Mapping:
+	// If upstream returned 404 Not Found, automatically map between
+	// /v1/* <-> /api/v1/* or /v1 <-> /api/v1/models
+	if resp.StatusCode == http.StatusNotFound {
+		var altPaths []string
+		if strings.HasPrefix(upstreamPath, "/v1/") {
+			altPaths = append(altPaths, "/api"+upstreamPath)
+		} else if strings.HasPrefix(upstreamPath, "/api/v1/") {
+			altPaths = append(altPaths, strings.TrimPrefix(upstreamPath, "/api"))
+		} else if upstreamPath == "/v1" || upstreamPath == "/v1/" {
+			altPaths = append(altPaths, "/api/v1", "/v1/models", "/api/v1/models")
+		} else if upstreamPath == "/api/v1" || upstreamPath == "/api/v1/" {
+			altPaths = append(altPaths, "/v1", "/api/v1/models", "/v1/models")
+		}
+
+		for _, altPath := range altPaths {
+			altURL := strings.TrimRight(target, "/") + altPath
+			if c.Request.URL.RawQuery != "" {
+				altURL += "?" + c.Request.URL.RawQuery
+			}
+			altReq, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, altURL, bytes.NewReader(body))
+			if err != nil {
+				continue
+			}
+			copyHeaders(altReq.Header, c.Request.Header)
+			altReq.Host = ""
+			if altResp, err := p.client.Do(altReq); err == nil {
+				if altResp.StatusCode != http.StatusNotFound {
+					resp.Body.Close()
+					resp = altResp
+					break
+				}
+				altResp.Body.Close()
+			}
+		}
 	}
 	defer resp.Body.Close()
 

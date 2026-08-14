@@ -112,3 +112,88 @@ func TestProxyWebAssetPassthrough(t *testing.T) {
 		t.Errorf("expected upstream to receive native token, got %q", receivedAuth)
 	}
 }
+
+func TestProxyNativeApiKeyPassthrough(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstreamCalled := false
+	var receivedAuth string
+	var receivedPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		receivedAuth = r.Header.Get("Authorization")
+		receivedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4o","object":"model"}]}`))
+	}))
+	defer upstream.Close()
+
+	table := router.NewTable(nil)
+	table.Set("omnirouter", upstream.URL)
+
+	p := New(table, nil, nil, nil, nil)
+
+	r := gin.New()
+	r.Any("/:slug", p.Handle)
+	r.Any("/:slug/*path", p.Handle)
+
+	req := httptest.NewRequest(http.MethodGet, "/omnirouter/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer sk-e3233a008021f896-f33a2c-f8a42a41")
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if !upstreamCalled {
+		t.Fatalf("expected upstream to be called for /omnirouter/v1/models")
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	if receivedAuth != "Bearer sk-e3233a008021f896-f33a2c-f8a42a41" {
+		t.Errorf("expected upstream to receive native sk key, got %q", receivedAuth)
+	}
+	if receivedPath != "/v1/models" {
+		t.Errorf("expected upstream path /v1/models, got %q", receivedPath)
+	}
+}
+
+func TestProxyAutomaticPathMapping(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// Upstream router serves models only on /api/v1/models, returns 404 on /v1/models
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"data":[{"id":"gemini-pro","object":"model"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer upstream.Close()
+
+	table := router.NewTable(nil)
+	table.Set("omnirouter", upstream.URL)
+
+	p := New(table, nil, nil, nil, nil)
+
+	r := gin.New()
+	r.Any("/:slug", p.Handle)
+	r.Any("/:slug/*path", p.Handle)
+
+	// Client calls /omnirouter/v1/models
+	req := httptest.NewRequest(http.MethodGet, "/omnirouter/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer sk-custom-key")
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected automatic path mapping to succeed with 200 OK, got %d (body: %s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "gemini-pro") {
+		t.Fatalf("expected response body to contain model data, got: %s", w.Body.String())
+	}
+}
+

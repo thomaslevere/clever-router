@@ -1436,13 +1436,17 @@ func (a *API) manualS3Restore(c *gin.Context) {
 		return
 	}
 
-	localPath := filepath.Join(a.cfg.VolumeScratchDir, r.ID, "app_data")
-	s3Key := fmt.Sprintf("namespaces/%s/app_data.tar.zst", r.ID)
-	if err := a.bridge.HydrateFromS3(c.Request.Context(), s3Key, localPath); err != nil {
+	if err := a.manager.RestoreSnapshot(c.Request.Context(), r); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("restore failed: %v", err)})
 		return
 	}
 
+	// Restart router to reload the restored database into runtime memory
+	if r.RuntimeState == "running" {
+		_ = a.manager.Restart(c.Request.Context(), r)
+	}
+
+	s3Key := fmt.Sprintf("namespaces/%s/app_data.tar.zst", r.ID)
 	a.audit(c, "storage.s3.restore", "router", r.ID, nil, store.Map{"slug": r.Slug, "key": s3Key})
 	c.JSON(http.StatusOK, gin.H{"status": "restored"})
 }

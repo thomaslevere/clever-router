@@ -501,6 +501,36 @@ func (m *Manager) Snapshot(ctx context.Context, r *store.Router) error {
 	return nil
 }
 
+// RestoreSnapshot hydrates the container from S3 snapshot.
+func (m *Manager) RestoreSnapshot(ctx context.Context, r *store.Router) error {
+	if m.bridge == nil || r.ContainerID == "" {
+		return nil
+	}
+	ad, err := m.reg.Get(r.AdapterType)
+	volumes, _ := m.InspectImageVolumes(ctx, r.ImageRef)
+	if len(volumes) == 0 && err == nil {
+		volumes = ad.DeclaredVolumes(r)
+	}
+	if len(volumes) == 0 {
+		volumes = []string{"/app/data"}
+	}
+	for _, targetVol := range volumes {
+		sanitized := strings.TrimPrefix(strings.ReplaceAll(targetVol, "/", "_"), "_")
+		if sanitized == "" {
+			sanitized = "data"
+		}
+		s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
+		targetParent := filepath.Dir(targetVol)
+		if targetParent == "" || targetParent == "." {
+			targetParent = "/"
+		}
+		if err := m.bridge.HydrateContainer(ctx, m.docker, r.ContainerID, s3Key, targetParent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // StopAll stops all active router containers and snapshots their volumes before shutdown.
 func (m *Manager) StopAll(ctx context.Context) {
 	routers, err := m.store.ListRouters(ctx)

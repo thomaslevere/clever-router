@@ -39,6 +39,7 @@ export default function RouterDetailPage() {
   const [credKey, setCredKey] = useState("");
   const [panelUrl, setPanelUrl] = useState("");
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedBaseUrl, setCopiedBaseUrl] = useState(false);
   const [initialPassword, setInitialPassword] = useState<string>("");
   const [isDefaultPassword, setIsDefaultPassword] = useState<boolean>(false);
   const [copiedPass, setCopiedPass] = useState(false);
@@ -193,48 +194,66 @@ export default function RouterDetailPage() {
               <code className="text-brand font-medium">{r.endpoint_path}/v1/…</code> · {r.adapter_type} ·{" "}
               {r.image_ref}
             </p>
-            {realtime.targetAddr && (
-              <div className="mt-2 flex flex-col gap-1 text-xs text-slate-500 dark:text-slate-400">
+            <div className="mt-2 flex flex-col gap-1 text-xs text-slate-500 dark:text-slate-400">
+              <div className="flex items-center gap-2 flex-wrap pt-0.5">
+                <span className="font-medium text-slate-600 dark:text-slate-300">OpenAI Base URL:</span>
+                <code className="bg-brand/10 dark:bg-brand/20 border border-brand/20 dark:border-brand/30 px-2 py-0.5 rounded text-brand font-mono font-semibold text-xs">
+                  {typeof window !== "undefined" ? `${window.location.origin}${r.endpoint_path}/v1` : `${r.endpoint_path}/v1`}
+                </code>
+                <button
+                  type="button"
+                  className="text-[11px] px-2 py-0.5 rounded border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5 text-slate-600 dark:text-slate-400 font-mono transition"
+                  onClick={() => {
+                    const base = typeof window !== "undefined" ? `${window.location.origin}${r.endpoint_path}/v1` : `${r.endpoint_path}/v1`;
+                    navigator.clipboard.writeText(base);
+                    setCopiedBaseUrl(true);
+                    setTimeout(() => setCopiedBaseUrl(false), 2000);
+                  }}
+                >
+                  {copiedBaseUrl ? "✓ Copied!" : "📋 Copy Base URL"}
+                </button>
+              </div>
+              {realtime.targetAddr && (
                 <p>
                   Target internal: <code className="font-mono text-slate-700 dark:text-slate-300">{realtime.targetAddr}</code>
                 </p>
-                {(panelUrl || realtime.nativePanelUrl) && (
-                  <div className="flex items-center gap-2 flex-wrap pt-1">
-                    <span className="font-medium text-slate-600 dark:text-slate-300">Native Dashboard:</span>
-                    {isRunning && realtime.healthStatus === "healthy" ? (
-                      <>
-                        <a
-                          className="text-brand hover:underline font-semibold font-mono text-xs inline-flex items-center gap-1.5 bg-brand/10 dark:bg-brand/20 text-brand px-2.5 py-1 rounded-md transition hover:bg-brand/20 dark:hover:bg-brand/30"
-                          target="_blank"
-                          rel="noreferrer"
-                          href={panelUrl || realtime.nativePanelUrl}
-                        >
-                          <span>Open Native Panel ↗</span>
-                        </a>
-                        <button
-                          type="button"
-                          className="text-[11px] px-2 py-0.5 rounded border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5 text-slate-600 dark:text-slate-400 font-mono transition"
-                          onClick={() => {
-                            const url = panelUrl || realtime.nativePanelUrl;
-                            if (url) {
-                              navigator.clipboard.writeText(url);
-                              setCopiedUrl(true);
-                              setTimeout(() => setCopiedUrl(false), 2000);
-                            }
-                          }}
-                        >
-                          {copiedUrl ? "✓ Copied!" : "📋 Copy URL"}
-                        </button>
-                      </>
-                    ) : (
-                      <span className="text-xs text-slate-400 italic font-mono">
-                        {isStarting ? "Launching container & running migrations..." : "Available when router is running & healthy"}
-                      </span>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+              )}
+              {(panelUrl || realtime.nativePanelUrl) && (
+                <div className="flex items-center gap-2 flex-wrap pt-1">
+                  <span className="font-medium text-slate-600 dark:text-slate-300">Native Dashboard:</span>
+                  {isRunning && realtime.healthStatus === "healthy" ? (
+                    <>
+                      <a
+                        className="text-brand hover:underline font-semibold font-mono text-xs inline-flex items-center gap-1.5 bg-brand/10 dark:bg-brand/20 text-brand px-2.5 py-1 rounded-md transition hover:bg-brand/20 dark:hover:bg-brand/30"
+                        target="_blank"
+                        rel="noreferrer"
+                        href={panelUrl || realtime.nativePanelUrl}
+                      >
+                        <span>Open Native Panel ↗</span>
+                      </a>
+                      <button
+                        type="button"
+                        className="text-[11px] px-2 py-0.5 rounded border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5 text-slate-600 dark:text-slate-400 font-mono transition"
+                        onClick={() => {
+                          const url = panelUrl || realtime.nativePanelUrl;
+                          if (url) {
+                            navigator.clipboard.writeText(url);
+                            setCopiedUrl(true);
+                            setTimeout(() => setCopiedUrl(false), 2000);
+                          }
+                        }}
+                      >
+                        {copiedUrl ? "✓ Copied!" : "📋 Copy URL"}
+                      </button>
+                    </>
+                  ) : (
+                    <span className="text-xs text-slate-400 italic font-mono">
+                      {isStarting ? "Launching container & running migrations..." : "Available when router is running & healthy"}
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Interactive Button Bar */}

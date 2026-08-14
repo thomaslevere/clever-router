@@ -253,7 +253,7 @@ func (b *FastVolumeBridge) StreamSnapshotToS3(ctx context.Context, sourceDir, s3
 	return nil
 }
 
-// HydrateContainer downloads a .tar.zst snapshot from S3, decompresses it into a tar stream,
+// HydrateContainer downloads a .tar.zst snapshot from S3, decompresses it, normalizes all tar UID/GIDs to 0 (root),
 // and copies it directly into the target container directory via Docker API.
 func (b *FastVolumeBridge) HydrateContainer(ctx context.Context, cli *client.Client, containerID, s3Key, targetParentDir string) error {
 	if b.client == nil || cli == nil {
@@ -286,8 +286,43 @@ func (b *FastVolumeBridge) HydrateContainer(ctx context.Context, cli *client.Cli
 
 	pr, pw := io.Pipe()
 	go func() {
-		_, copyErr := io.Copy(pw, zr)
-		_ = pw.CloseWithError(copyErr)
+		tr := tar.NewReader(zr)
+		tw := tar.NewWriter(pw)
+		defer func() {
+			_ = tw.Close()
+			_ = pw.Close()
+		}()
+
+		for {
+			header, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+
+			// CRITICAL FIX: Normalize UID and GID to 0 (root) so Docker userns remap never rejects the archive
+			header.Uid = 0
+			header.Gid = 0
+			header.Uname = ""
+			header.Gname = ""
+			if header.Typeflag == tar.TypeDir {
+				header.Mode = 0777
+			} else {
+				header.Mode = 0666
+			}
+
+			if err := tw.WriteHeader(header); err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+			if _, err := io.Copy(tw, tr); err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+		}
 	}()
 
 	err = cli.CopyToContainer(ctx, containerID, targetParentDir, pr, container.CopyToContainerOptions{
@@ -322,17 +357,46 @@ func (b *FastVolumeBridge) SnapshotContainer(ctx context.Context, cli *client.Cl
 		return fmt.Errorf("create zstd writer: %w", err)
 	}
 
-	written, err := io.Copy(zw, reader)
-	if err != nil {
-		_ = zw.Close()
-		return fmt.Errorf("compress container tar stream: %w", err)
+	tr := tar.NewReader(reader)
+	tw := tar.NewWriter(zw)
+	fileCount := 0
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break
+		}
+
+		// Normalize UID/GID for portability across all Docker hosts and userns configurations
+		header.Uid = 0
+		header.Gid = 0
+		header.Uname = ""
+		header.Gname = ""
+		if header.Typeflag == tar.TypeDir {
+			header.Mode = 0777
+		} else {
+			header.Mode = 0666
+		}
+
+		if err := tw.WriteHeader(header); err != nil {
+			continue
+		}
+		if _, err := io.Copy(tw, tr); err != nil {
+			continue
+		}
+		fileCount++
 	}
+
+	_ = tw.Close()
 	if err := zw.Close(); err != nil {
 		return fmt.Errorf("close zstd writer: %w", err)
 	}
 
-	// Avoid overwriting a valid snapshot with an empty one (e.g. empty dir tar <= 512 bytes)
-	if written <= 512 || buf.Len() <= 32 {
+	// Avoid uploading empty archives
+	if fileCount == 0 || buf.Len() <= 32 {
 		return nil
 	}
 
@@ -348,6 +412,6 @@ func (b *FastVolumeBridge) SnapshotContainer(ctx context.Context, cli *client.Cl
 		return fmt.Errorf("put S3 object %s: %w", s3Key, err)
 	}
 
-	log.Printf("[fast-bridge] streamed snapshot (%d raw bytes -> %d zstd bytes) from container %s:%s -> s3://%s/%s", written, len(payload), containerID[:12], srcDir, b.bucket, s3Key)
+	log.Printf("[fast-bridge] streamed snapshot (%d files -> %d zstd bytes) from container %s:%s -> s3://%s/%s", fileCount, len(payload), containerID[:12], srcDir, b.bucket, s3Key)
 	return nil
 }

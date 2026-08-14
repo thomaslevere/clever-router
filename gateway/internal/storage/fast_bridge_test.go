@@ -105,7 +105,7 @@ func TestZstdTarArchiveAndExtract(t *testing.T) {
 }
 
 func TestFastVolumeBridgeMissingCredentials(t *testing.T) {
-	_, err := NewFastVolumeBridge("", "", "", "", false)
+	_, err := NewFastVolumeBridge("", "", "", "", "us-east-1", false)
 	if err == nil {
 		t.Fatal("expected error with empty credentials, got nil")
 	}

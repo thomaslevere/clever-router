@@ -25,15 +25,20 @@ type FastVolumeBridge struct {
 	keyLocks sync.Map // map[string]*sync.Mutex
 }
 
-// NewFastVolumeBridge initializes MinIO S3 client.
-func NewFastVolumeBridge(endpoint, accessKey, secretKey, bucket string, useSSL bool) (*FastVolumeBridge, error) {
+// NewFastVolumeBridge initializes MinIO S3 client with region and credentials.
+func NewFastVolumeBridge(endpoint, accessKey, secretKey, bucket, region string, useSSL bool) (*FastVolumeBridge, error) {
 	if endpoint == "" || accessKey == "" || secretKey == "" {
 		return nil, fmt.Errorf("missing S3 credentials: endpoint, accessKey, and secretKey are required")
+	}
+
+	if region == "" {
+		region = "us-east-1"
 	}
 
 	minioClient, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(accessKey, secretKey, ""),
 		Secure: useSSL,
+		Region: region,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize MinIO client: %w", err)
@@ -43,10 +48,10 @@ func NewFastVolumeBridge(endpoint, accessKey, secretKey, bucket string, useSSL b
 	ctx := context.Background()
 	exists, err := minioClient.BucketExists(ctx, bucket)
 	if err == nil && !exists {
-		if makeErr := minioClient.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); makeErr != nil {
-			log.Printf("[fast-bridge] warning: could not make bucket %q: %v", bucket, makeErr)
+		if makeErr := minioClient.MakeBucket(ctx, bucket, minio.MakeBucketOptions{Region: region}); makeErr != nil {
+			log.Printf("[fast-bridge] warning: could not make bucket %q in region %q: %v", bucket, region, makeErr)
 		} else {
-			log.Printf("[fast-bridge] created S3 bucket %q", bucket)
+			log.Printf("[fast-bridge] created S3 bucket %q (region: %s)", bucket, region)
 		}
 	} else if err != nil {
 		log.Printf("[fast-bridge] warning: bucket check for %q: %v", bucket, err)
@@ -85,9 +90,10 @@ func (b *FastVolumeBridge) HydrateFromS3(ctx context.Context, s3Key, targetDir s
 		return nil
 	}
 
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
+	if err := os.MkdirAll(targetDir, 0777); err != nil {
 		return fmt.Errorf("create target dir %s: %w", targetDir, err)
 	}
+	_ = os.Chmod(targetDir, 0777)
 
 	zr, err := zstd.NewReader(obj)
 	if err != nil {
@@ -114,19 +120,20 @@ func (b *FastVolumeBridge) HydrateFromS3(ctx context.Context, s3Key, targetDir s
 
 		targetPath := filepath.Join(targetDir, cleaned)
 		if header.Typeflag == tar.TypeDir {
-			if err := os.MkdirAll(targetPath, 0755); err != nil {
+			if err := os.MkdirAll(targetPath, 0777); err != nil {
 				return err
 			}
+			_ = os.Chmod(targetPath, 0777)
 			continue
 		}
 
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0777); err != nil {
 			return err
 		}
 
 		mode := header.FileInfo().Mode()
 		if mode == 0 {
-			mode = 0644
+			mode = 0666
 		}
 		f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, mode)
 		if err != nil {
@@ -140,6 +147,7 @@ func (b *FastVolumeBridge) HydrateFromS3(ctx context.Context, s3Key, targetDir s
 		count++
 	}
 
+	_ = os.Chmod(targetDir, 0777)
 	log.Printf("[fast-bridge] hydrated %d files from s3://%s/%s -> %s", count, b.bucket, s3Key, targetDir)
 	return nil
 }

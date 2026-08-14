@@ -65,6 +65,10 @@ COPY --from=admin /app/admin/.next/static /app/admin/.next/static
 RUN printf '%s\n' \
     '#!/bin/bash' \
     'set -e' \
+    'DATA_PATH="${DATA_DIR:-/tmp/data}"' \
+    'SCRATCH_PATH="${VOLUME_SCRATCH_DIR:-/tmp/clever_router_volumes}"' \
+    'mkdir -p "$DATA_PATH" "$SCRATCH_PATH"' \
+    'chmod -R 777 "$DATA_PATH" "$SCRATCH_PATH" 2>/dev/null || true' \
     '(cd /app/admin && PORT=3000 HOSTNAME=127.0.0.1 node server.js) &' \
     'NEXT_PID=$!' \
     'echo "[entrypoint] waiting for Next.js on :3000…"' \

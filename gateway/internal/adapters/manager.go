@@ -224,7 +224,8 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 		localPath := filepath.Join(m.scratchDir, r.ID, sanitized)
 		s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
 
-		_ = os.MkdirAll(localPath, 0755)
+		_ = os.MkdirAll(localPath, 0777)
+		_ = os.Chmod(localPath, 0777)
 
 		// Fast Hydration from S3 if bridge is configured
 		if m.bridge != nil {
@@ -241,6 +242,7 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 				log.Printf("[manager] warning: could not create volume watcher for %s: %v", localPath, err)
 			}
 		}
+		_ = os.Chmod(localPath, 0777)
 
 		dockerBinds = append(dockerBinds, fmt.Sprintf("%s:%s", localPath, targetVol))
 	}

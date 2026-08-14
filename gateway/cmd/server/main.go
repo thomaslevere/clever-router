@@ -68,12 +68,12 @@ func main() {
 	// S3 FastVolumeBridge (Clever Cloud Cellar / S3)
 	var bridge *storage.FastVolumeBridge
 	if cfg.HasCellar() {
-		b, err := storage.NewFastVolumeBridge(cfg.Cellar.Endpoint, cfg.Cellar.AccessKey, cfg.Cellar.SecretKey, cfg.Cellar.Bucket, cfg.Cellar.UseSSL)
+		b, err := storage.NewFastVolumeBridge(cfg.Cellar.Endpoint, cfg.Cellar.AccessKey, cfg.Cellar.SecretKey, cfg.Cellar.Bucket, cfg.Cellar.Region, cfg.Cellar.UseSSL)
 		if err != nil {
 			log.Printf("warning: failed to initialize S3 FastVolumeBridge: %v", err)
 		} else {
 			bridge = b
-			log.Printf("FastVolumeBridge connected to S3 (endpoint: %s, bucket: %s)", cfg.Cellar.Endpoint, cfg.Cellar.Bucket)
+			log.Printf("FastVolumeBridge connected to Cellar S3 (endpoint: %s, bucket: %s, region: %s)", cfg.Cellar.Endpoint, cfg.Cellar.Bucket, cfg.Cellar.Region)
 		}
 	} else {
 		log.Println("S3 FastVolumeBridge disabled (no Cellar/S3 credentials configured; using local disk volumes)")

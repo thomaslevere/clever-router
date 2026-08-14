@@ -526,8 +526,8 @@ func (a *API) putRouterEnv(c *gin.Context) {
 
 		val := item.Value
 		if item.IsSecret {
-			// Check if value is masked placeholder ("********" or "****")
-			if val == "********" || val == "****" {
+			// Check if value is masked placeholder ("********" or "****") or empty to keep existing secret
+			if val == "********" || val == "****" || val == "" {
 				if ex, ok := existingSecrets[k]; ok {
 					val = ex.Value // keep existing encrypted/plaintext value
 				} else {

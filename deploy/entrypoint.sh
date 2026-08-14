@@ -26,6 +26,12 @@ if [ $i -eq $MAX_WAIT ]; then
   echo "[entrypoint] warning: Next.js did not respond in ${MAX_WAIT}s — continuing anyway"
 fi
 
+# Initialize scratch storage with open permissions for container bind-mounts
+DATA_PATH="${DATA_DIR:-/tmp/data}"
+SCRATCH_PATH="${VOLUME_SCRATCH_DIR:-/tmp/clever_router_volumes}"
+mkdir -p "$DATA_PATH" "$SCRATCH_PATH"
+chmod -R 777 "$DATA_PATH" "$SCRATCH_PATH" 2>/dev/null || true
+
 # The Go gateway is the only public listener (:8080). It reverse-proxies
 # /admin/* to the UI above and /{slug}/* to managed router containers.
 exec /app/gateway

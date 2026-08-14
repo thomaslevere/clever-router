@@ -67,11 +67,12 @@ type API struct {
 	box      *secrets.Box
 	manager  *adapters.Manager
 	table    *router.Table
-	rest     *gin.Engine // private engine mounted under /admin/api/* and /api/*
-	logHub   *WSHub
-	auditHub *WSHub
-	bridge   *storage.FastVolumeBridge
-	explorer *storage.StorageExplorer
+	rest      *gin.Engine // private engine mounted under /admin/api/* and /api/*
+	logHub    *WSHub
+	auditHub  *WSHub
+	routerHub *RouterWSHub
+	bridge    *storage.FastVolumeBridge
+	explorer  *storage.StorageExplorer
 }
 
 type Deps struct {
@@ -87,6 +88,36 @@ type Deps struct {
 func New(d Deps) *API {
 	logHub := newWSHub(d.Cache)
 	auditHub := newWSHub(d.Cache)
+	routerHub := newRouterWSHub(d.Cache)
+
+	if d.Manager != nil {
+		d.Manager.SetEventHandler(func(routerID string, eventType string, payload map[string]any) {
+			status, _ := payload["status"].(string)
+			desiredState, _ := payload["desired_state"].(string)
+			runtimeState, _ := payload["runtime_state"].(string)
+			healthStatus, _ := payload["health_status"].(string)
+			targetAddr, _ := payload["target_addr"].(string)
+			nativePanelURL, _ := payload["native_panel_url"].(string)
+			modelsCount, _ := payload["models_count"].(int)
+			providersCount, _ := payload["providers_count"].(int)
+
+			routerHub.Broadcast(routerID, RouterEvent{
+				Type:           eventType,
+				RouterID:       routerID,
+				Status:         status,
+				DesiredState:   desiredState,
+				RuntimeState:   runtimeState,
+				HealthStatus:   healthStatus,
+				TargetAddr:     targetAddr,
+				NativePanelURL: nativePanelURL,
+				ModelsCount:    modelsCount,
+				ProvidersCount: providersCount,
+				Payload:        payload,
+				Timestamp:      time.Now().UnixMilli(),
+			})
+		})
+	}
+
 	logHub.StartListening(context.Background(), "events:logs")
 	auditHub.StartListening(context.Background(), "events:audit")
 
@@ -107,16 +138,17 @@ func New(d Deps) *API {
 	})
 
 	return &API{
-		cfg:      d.Cfg,
-		store:    d.Store,
-		cache:    d.Cache,
-		box:      d.Box,
-		manager:  d.Manager,
-		table:    d.Table,
-		logHub:   logHub,
-		auditHub: auditHub,
-		bridge:   d.Bridge,
-		explorer: explorer,
+		cfg:       d.Cfg,
+		store:     d.Store,
+		cache:     d.Cache,
+		box:       d.Box,
+		manager:   d.Manager,
+		table:     d.Table,
+		logHub:    logHub,
+		auditHub:  auditHub,
+		routerHub: routerHub,
+		bridge:    d.Bridge,
+		explorer:  explorer,
 	}
 }
 
@@ -198,6 +230,8 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 	g.GET("/ws/logs", a.wsLogs)
 	g.GET("/ws/audit", a.wsAudit)
 	g.GET("/ws/terminal", a.wsTerminal)
+	g.GET("/ws/routers/:id", a.wsRouter)
+	g.GET("/routers/:id/ws", a.wsRouter)
 
 	// System & Aggregator Logs
 	g.GET("/logs", a.listLogs)

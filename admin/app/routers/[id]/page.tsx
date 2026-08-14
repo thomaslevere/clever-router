@@ -7,6 +7,7 @@ import { api, UnauthorizedError, getRouterPanelUrl } from "../../lib/api";
 import type { Credential, EnvVariable, Model, Router } from "../../lib/types";
 import DeleteRouterModal from "../../components/DeleteRouterModal";
 import EnvironmentVariablesCard from "../../components/EnvironmentVariablesCard";
+import { useRouterRealtime } from "../../lib/useRouterRealtime";
 
 function stateBadge(s: string) {
   const map: Record<string, string> = {
@@ -14,7 +15,8 @@ function stateBadge(s: string) {
     stopped: "badge-gray",
     failed: "badge-red",
     unhealthy: "badge-amber",
-    starting: "badge-amber",
+    starting: "badge-amber animate-pulse",
+    stopping: "badge-red animate-pulse",
   };
   return map[s] || "badge-gray";
 }
@@ -29,11 +31,9 @@ export default function RouterDetailPage() {
   const [envVars, setEnvVars] = useState<EnvVariable[]>([]);
   const [autoRestart, setAutoRestart] = useState(false);
   const [err, setErr] = useState("");
-  const [busy, setBusy] = useState("");
-  const [logs, setLogs] = useState("");
-  const [logOn, setLogOn] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
-  const logAbort = useRef<AbortController | null>(null);
+  const [autoScrollLogs, setAutoScrollLogs] = useState(true);
+  const terminalEndRef = useRef<HTMLDivElement>(null);
 
   const [credProvider, setCredProvider] = useState("");
   const [credKey, setCredKey] = useState("");
@@ -43,12 +43,6 @@ export default function RouterDetailPage() {
   const [isDefaultPassword, setIsDefaultPassword] = useState<boolean>(false);
   const [copiedPass, setCopiedPass] = useState(false);
   const [isWiping, setIsWiping] = useState(false);
-
-  useEffect(() => {
-    if (r) {
-      setPanelUrl(getRouterPanelUrl(r));
-    }
-  }, [r]);
 
   const loadFull = useCallback(async () => {
     try {
@@ -84,64 +78,31 @@ export default function RouterDetailPage() {
     }
   }, [id]);
 
-  const pollStatus = useCallback(async () => {
-    try {
-      const [statusData, ms] = await Promise.all([
-        api.get<{
-          id: string;
-          slug: string;
-          desired_state: string;
-          runtime_state: string;
-          health_status: string;
-          models_count: number;
-          providers_count: number;
-          last_seen_at: string | null;
-        }>(`/routers/${id}/status`).catch(() => null),
-        api.get<Model[]>(`/routers/${id}/models`).catch(() => null),
-      ]);
-
-      if (statusData) {
-        setR((prev) => {
-          if (!prev) return null;
-          return {
-            ...prev,
-            desired_state: statusData.desired_state,
-            runtime_state: statusData.runtime_state,
-            health_status: statusData.health_status,
-            models_count: statusData.models_count,
-            providers_count: statusData.providers_count,
-            last_seen_at: statusData.last_seen_at,
-          };
-        });
-      }
-
-      if (ms) {
-        setModels(ms);
-      }
-    } catch (e: any) {
-      if (e instanceof UnauthorizedError) {
-        window.dispatchEvent(new Event("cr:auth-changed"));
-      }
-    }
-  }, [id]);
-
   useEffect(() => {
     loadFull();
-    const t = setInterval(pollStatus, 3500);
-    return () => clearInterval(t);
-  }, [loadFull, pollStatus]);
+  }, [loadFull]);
 
-  async function act(name: string, path: string) {
-    setBusy(name);
-    try {
-      await api.post(path);
-    } catch (e: any) {
-      setErr(e.message);
-    } finally {
-      setBusy("");
-      setTimeout(loadFull, 500);
+  const realtime = useRouterRealtime(id, r, loadFull);
+
+  useEffect(() => {
+    if (r) {
+      const live = {
+        ...r,
+        runtime_state: realtime.runtimeState,
+        health_status: realtime.healthStatus,
+        target_addr: realtime.targetAddr || r.target_addr,
+        native_panel_url: realtime.nativePanelUrl || r.native_panel_url,
+      };
+      setPanelUrl(getRouterPanelUrl(live));
     }
-  }
+  }, [r, realtime.runtimeState, realtime.healthStatus, realtime.targetAddr, realtime.nativePanelUrl]);
+
+  // Auto-scroll terminal on new log lines
+  useEffect(() => {
+    if (autoScrollLogs) {
+      terminalEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [realtime.logs, autoScrollLogs]);
 
   async function saveCred(e: React.FormEvent) {
     e.preventDefault();
@@ -155,36 +116,6 @@ export default function RouterDetailPage() {
       loadFull();
     } catch (e: any) {
       setErr(e.message);
-    }
-  }
-
-  async function toggleLogs() {
-    if (logOn) {
-      logAbort.current?.abort();
-      setLogOn(false);
-      return;
-    }
-    setLogOn(true);
-    setLogs("");
-    const ac = new AbortController();
-    logAbort.current = ac;
-    try {
-      const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_BASE || "/admin/api"}/routers/${id}/logs`,
-        { headers: { Authorization: `Bearer ${localStorage.getItem("cr_admin_token")}` }, signal: ac.signal },
-      );
-      const reader = res.body?.getReader();
-      if (!reader) return;
-      const dec = new TextDecoder();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        setLogs((p) => (p + dec.decode(value)).slice(-20000));
-      }
-    } catch (e: any) {
-      if (e.name !== "AbortError") setErr(e.message);
-    } finally {
-      setLogOn(false);
     }
   }
 
@@ -214,10 +145,14 @@ export default function RouterDetailPage() {
     setTimeout(() => setCopiedPass(false), 2000);
   }
 
-  useEffect(() => () => logAbort.current?.abort(), []);
-
   if (err && !r) return <div className="card border-red-500/30 text-xs text-red-500 bg-red-500/10 p-4">{err}</div>;
   if (!r) return <p className="text-xs text-slate-500">Loading router details…</p>;
+
+  const currentRuntime = realtime.runtimeState || r.runtime_state;
+  const isStarting = currentRuntime === "starting" || realtime.busyAction === "start";
+  const isStopping = currentRuntime === "stopping" || realtime.busyAction === "stop";
+  const isRunning = currentRuntime === "running";
+  const isStopped = currentRuntime === "stopped";
 
   return (
     <div className="space-y-6">
@@ -229,94 +164,125 @@ export default function RouterDetailPage() {
         <span className="text-slate-800 dark:text-slate-200 font-semibold">{r.slug}</span>
       </div>
 
-      {/* Main Header Card */}
+      {realtime.actionError && (
+        <div className="card border-red-500/30 text-xs text-red-500 bg-red-500/10 p-3 flex items-center justify-between">
+          <span>{realtime.actionError}</span>
+        </div>
+      )}
+
+      {/* Main Header Card with Real-Time Interactivity */}
       <div className="card shadow-lg p-6 border border-black/10 dark:border-white/10">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <div className="flex items-center gap-2.5 flex-wrap">
               <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100">{r.name}</h1>
-              <span className={stateBadge(r.runtime_state)}>{r.runtime_state}</span>
-              {r.health_status === "healthy" && (
+              
+              {/* Reactive Status Badge */}
+              <span className={stateBadge(currentRuntime)}>
+                {isStarting ? "● starting…" : isStopping ? "● stopping…" : `● ${currentRuntime}`}
+              </span>
+
+              {realtime.healthStatus === "healthy" && isRunning && (
                 <span className="badge badge-green">● healthy</span>
+              )}
+              {realtime.healthStatus === "unhealthy" && isRunning && (
+                <span className="badge badge-amber animate-pulse">● booting…</span>
               )}
             </div>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">
               <code className="text-brand font-medium">{r.endpoint_path}/v1/…</code> · {r.adapter_type} ·{" "}
               {r.image_ref}
             </p>
-            {r.target_addr && (
+            {realtime.targetAddr && (
               <div className="mt-2 flex flex-col gap-1 text-xs text-slate-500 dark:text-slate-400">
                 <p>
-                  Target internal: <code className="font-mono text-slate-700 dark:text-slate-300">{r.target_addr}</code>
+                  Target internal: <code className="font-mono text-slate-700 dark:text-slate-300">{realtime.targetAddr}</code>
                 </p>
-                {r.native_panel_url && (
+                {(panelUrl || realtime.nativePanelUrl) && (
                   <div className="flex items-center gap-2 flex-wrap pt-1">
                     <span className="font-medium text-slate-600 dark:text-slate-300">Native Dashboard:</span>
-                    <a
-                      className="text-brand hover:underline font-semibold font-mono text-xs inline-flex items-center gap-1.5 bg-brand/10 dark:bg-brand/20 text-brand px-2.5 py-1 rounded-md transition hover:bg-brand/20 dark:hover:bg-brand/30"
-                      target="_blank"
-                      rel="noreferrer"
-                      href={panelUrl || getRouterPanelUrl(r)}
-                      onClick={(e) => {
-                        const url = getRouterPanelUrl(r);
-                        if (url && url !== e.currentTarget.href) {
-                          e.currentTarget.href = url;
-                        }
-                      }}
-                    >
-                      <span>Open Native Panel ↗</span>
-                    </a>
-                    <button
-                      type="button"
-                      className="text-[11px] px-2 py-0.5 rounded border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5 text-slate-600 dark:text-slate-400 font-mono transition"
-                      onClick={() => {
-                        const url = getRouterPanelUrl(r);
-                        if (url) {
-                          navigator.clipboard.writeText(url);
-                          setCopiedUrl(true);
-                          setTimeout(() => setCopiedUrl(false), 2000);
-                        }
-                      }}
-                    >
-                      {copiedUrl ? "✓ Copied!" : "📋 Copy URL"}
-                    </button>
+                    {isRunning && realtime.healthStatus === "healthy" ? (
+                      <>
+                        <a
+                          className="text-brand hover:underline font-semibold font-mono text-xs inline-flex items-center gap-1.5 bg-brand/10 dark:bg-brand/20 text-brand px-2.5 py-1 rounded-md transition hover:bg-brand/20 dark:hover:bg-brand/30"
+                          target="_blank"
+                          rel="noreferrer"
+                          href={panelUrl || realtime.nativePanelUrl}
+                        >
+                          <span>Open Native Panel ↗</span>
+                        </a>
+                        <button
+                          type="button"
+                          className="text-[11px] px-2 py-0.5 rounded border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5 text-slate-600 dark:text-slate-400 font-mono transition"
+                          onClick={() => {
+                            const url = panelUrl || realtime.nativePanelUrl;
+                            if (url) {
+                              navigator.clipboard.writeText(url);
+                              setCopiedUrl(true);
+                              setTimeout(() => setCopiedUrl(false), 2000);
+                            }
+                          }}
+                        >
+                          {copiedUrl ? "✓ Copied!" : "📋 Copy URL"}
+                        </button>
+                      </>
+                    ) : (
+                      <span className="text-xs text-slate-400 italic font-mono">
+                        {isStarting ? "Launching container & running migrations..." : "Available when router is running & healthy"}
+                      </span>
+                    )}
                   </div>
                 )}
               </div>
             )}
           </div>
 
-          <div className="flex flex-wrap gap-2">
+          {/* Interactive Button Bar */}
+          <div className="flex flex-wrap gap-2 items-center">
+            {/* Start Button */}
             <button
-              className="btn-primary text-xs shadow-sm"
-              disabled={busy === "start"}
-              onClick={() => act("start", `/routers/${id}/start`)}
+              className="btn-primary text-xs shadow-sm flex items-center gap-1.5 transition-all"
+              disabled={isRunning || isStarting || isStopping || isWiping}
+              onClick={realtime.handleStart}
             >
-              {busy === "start" ? "Starting…" : "▶ Start"}
+              {isStarting && <span className="inline-block animate-spin text-xs">⏳</span>}
+              <span>{isStarting ? "Starting…" : "▶ Start"}</span>
             </button>
+
+            {/* Restart Button */}
             <button
-              className="btn-secondary text-xs"
-              disabled={busy === "restart"}
-              onClick={() => act("restart", `/routers/${id}/restart`)}
+              className="btn-secondary text-xs flex items-center gap-1.5 transition-all"
+              disabled={!isRunning || isStarting || isStopping || isWiping || realtime.busyAction === "restart"}
+              onClick={realtime.handleRestart}
             >
-              🔄 Restart
+              {realtime.busyAction === "restart" && <span className="inline-block animate-spin text-xs">🔄</span>}
+              <span>{realtime.busyAction === "restart" ? "Restarting…" : "🔄 Restart"}</span>
             </button>
+
+            {/* Stop Button */}
             <button
-              className="btn-danger text-xs"
-              disabled={busy === "stop"}
-              onClick={() => act("stop", `/routers/${id}/stop`)}
+              className="btn-danger text-xs flex items-center gap-1.5 transition-all"
+              disabled={isStopped || isStarting || isStopping || isWiping}
+              onClick={realtime.handleStop}
             >
-              ⏹ Stop
+              {isStopping && <span className="inline-block animate-spin text-xs">⏳</span>}
+              <span>{isStopping ? "Stopping…" : "⏹ Stop"}</span>
             </button>
+
+            {/* Discover Models Button */}
             <button
-              className="btn-ghost text-xs"
-              disabled={busy === "discover"}
-              onClick={() => act("discover", `/routers/${id}/discover`)}
+              className="btn-ghost text-xs flex items-center gap-1.5 transition-all"
+              disabled={!isRunning || isStarting || isStopping || isWiping || realtime.busyAction === "discover"}
+              onClick={realtime.handleDiscover}
             >
-              🔍 Discover Models
+              {realtime.busyAction === "discover" && <span className="inline-block animate-spin text-xs">🔍</span>}
+              <span>{realtime.busyAction === "discover" ? "Discovering…" : "🔍 Discover Models"}</span>
             </button>
+
+            {/* Delete Router Button */}
             <button
               className="btn-danger text-xs bg-red-800/80 hover:bg-red-700"
+              disabled={isStarting || isStopping || isWiping}
               onClick={() => setShowDeleteModal(true)}
             >
               🗑️ Delete Router
@@ -386,7 +352,7 @@ export default function RouterDetailPage() {
 
               <button
                 type="button"
-                disabled={isWiping}
+                disabled={isWiping || isStarting || isStopping}
                 onClick={handleWipe}
                 className="btn text-xs bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400 border border-red-500/30 flex items-center gap-1.5 py-1.5 px-3 transition"
                 title="Purge SQLite state from local disk and Cellar S3, restarting completely fresh into setup wizard"
@@ -462,7 +428,7 @@ export default function RouterDetailPage() {
             <span>Discovered AI Models</span>
           </h2>
           <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-            {r.providers_count} {r.providers_count === 1 ? "provider" : "providers"} · {r.models_count} models discovered
+            {realtime.providersCount || r.providers_count} {(realtime.providersCount || r.providers_count) === 1 ? "provider" : "providers"} · {realtime.modelsCount || r.models_count} models discovered
           </p>
 
           <div className="mt-4 max-h-72 overflow-y-auto space-y-1.5 flex-1 pr-1">
@@ -497,20 +463,65 @@ export default function RouterDetailPage() {
         onUpdated={loadFull}
       />
 
-      {/* Container Output */}
+      {/* Real-time Container Logs Console */}
       <div className="card shadow-md p-5 border border-black/10 dark:border-white/10">
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-            <span>🖥️</span>
-            <span>Container Stdout / Stderr Stream</span>
-          </h2>
-          <button className="btn-ghost text-xs px-3 py-1" onClick={toggleLogs}>
-            {logOn ? "⏹ Disconnect" : "🔌 Attach Stream"}
-          </button>
+        <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <div className="flex items-center gap-3">
+            <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              <span>🖥️</span>
+              <span>Container Real-Time Logs</span>
+            </h2>
+            <div className="text-[11px] font-mono flex items-center gap-1.5">
+              {realtime.wsStatus === "connected" ? (
+                <span className="text-emerald-500 flex items-center gap-1 font-medium">
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span> Live WebSocket Stream
+                </span>
+              ) : (
+                <span className="text-amber-500 flex items-center gap-1 font-medium animate-pulse">
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500"></span> Reconnecting…
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className={`text-[11px] px-2.5 py-1 rounded font-mono border transition ${
+                autoScrollLogs
+                  ? "bg-brand/10 border-brand/30 text-brand font-medium"
+                  : "border-black/10 dark:border-white/10 text-slate-500"
+              }`}
+              onClick={() => setAutoScrollLogs(!autoScrollLogs)}
+            >
+              {autoScrollLogs ? "✓ Auto-scroll ON" : "Auto-scroll OFF"}
+            </button>
+            <button
+              type="button"
+              className="btn-ghost text-xs px-2.5 py-1"
+              onClick={realtime.clearLogs}
+            >
+              Clear
+            </button>
+          </div>
         </div>
-        <pre className="h-60 overflow-auto rounded-lg bg-[#090d16] p-3 text-xs font-mono text-slate-300 border border-black/10 dark:border-white/10 select-text">
-{logs || "Click 'Attach Stream' to inspect live container logs."}
-        </pre>
+
+        <div className="h-64 overflow-auto rounded-lg bg-[#090d16] p-3 text-xs font-mono text-slate-300 border border-black/10 dark:border-white/10 select-text space-y-0.5">
+          {realtime.logs.length === 0 ? (
+            <div className="text-slate-600 italic py-4">
+              {isRunning
+                ? "Listening for live container logs... output will appear here as container processes execute."
+                : "Router container is stopped. Click 'Start' to launch container and view live booting logs."}
+            </div>
+          ) : (
+            realtime.logs.map((line, idx) => (
+              <div key={idx} className="whitespace-pre-wrap leading-relaxed opacity-90 hover:opacity-100 hover:text-white">
+                {line}
+              </div>
+            ))
+          )}
+          <div ref={terminalEndRef} />
+        </div>
       </div>
 
       {showDeleteModal && r && (

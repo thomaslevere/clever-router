@@ -51,6 +51,23 @@ type Manager struct {
 	scratchDir string
 	watchersMu sync.Mutex
 	watchers   map[string][]*storage.VolumeWatcher
+	onEventMu  sync.RWMutex
+	onEvent    func(routerID string, eventType string, payload map[string]any)
+}
+
+func (m *Manager) SetEventHandler(fn func(routerID string, eventType string, payload map[string]any)) {
+	m.onEventMu.Lock()
+	m.onEvent = fn
+	m.onEventMu.Unlock()
+}
+
+func (m *Manager) emitEvent(routerID string, eventType string, payload map[string]any) {
+	m.onEventMu.RLock()
+	fn := m.onEvent
+	m.onEventMu.RUnlock()
+	if fn != nil {
+		fn(routerID, eventType, payload)
+	}
 }
 
 func NewManager(st *store.Store, c *cache.Cache, box *secrets.Box, reg *Registry, allowed []string, table *router.Table, bridge *storage.FastVolumeBridge, scratchDir string) (*Manager, error) {
@@ -172,9 +189,16 @@ func (m *Manager) InspectImageVolumes(ctx context.Context, imageName string) ([]
 
 // Start provisions/restarts the router's sibling container and wires its route.
 func (m *Manager) Start(ctx context.Context, r *store.Router) error {
+	m.emitEvent(r.ID, "state_changed", map[string]any{
+		"status":        "starting",
+		"runtime_state": "starting",
+		"desired_state": "running",
+		"slug":          r.Slug,
+	})
+
 	ad, err := m.reg.Get(r.AdapterType)
 	if err != nil {
-		return err
+		return fmt.Errorf("unknown adapter %q: %w", r.AdapterType, err)
 	}
 	if !m.imageAllowed(r.ImageRef) {
 		return fmt.Errorf("image %q is not in ALLOWED_IMAGES", r.ImageRef)
@@ -335,6 +359,13 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 		panel := endpoint + ad.NativePanelPath(r)
 		_ = m.store.UpdateRouterState(ctx, r.ID, "unhealthy", fallbackAddr, created.ID, panel, "unhealthy")
 		_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
+		m.emitEvent(r.ID, "state_changed", map[string]any{
+			"status":        "unhealthy",
+			"runtime_state": "unhealthy",
+			"health_status": "unhealthy",
+			"desired_state": "running",
+			"slug":          r.Slug,
+		})
 		return fmt.Errorf("router %s started but did not pass health check within 90s", r.Slug)
 	}
 
@@ -351,6 +382,18 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	}
 	m.table.Set(r.Slug, workingAddr)
 
+	m.emitEvent(r.ID, "state_changed", map[string]any{
+		"status":           "running",
+		"runtime_state":    "running",
+		"health_status":    "healthy",
+		"desired_state":    "running",
+		"target_addr":      workingAddr,
+		"native_panel_url": panel,
+		"models_count":     r.ModelsCount,
+		"providers_count":  r.ProvidersCount,
+		"slug":             r.Slug,
+	})
+
 	// Best-effort discovery; never block traffic on it.
 	_ = m.DiscoverModels(ctx, r, ad, workingAddr)
 	_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
@@ -365,6 +408,13 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 
 // Stop removes the router's container and clears its route, flushing volume snapshots to S3.
 func (m *Manager) Stop(ctx context.Context, r *store.Router) error {
+	m.emitEvent(r.ID, "state_changed", map[string]any{
+		"status":        "stopping",
+		"runtime_state": "stopping",
+		"desired_state": "stopped",
+		"slug":          r.Slug,
+	})
+
 	// 1. Stop active file watchers for this router
 	m.watchersMu.Lock()
 	if ws, ok := m.watchers[r.ID]; ok {
@@ -410,6 +460,13 @@ func (m *Manager) Stop(ctx context.Context, r *store.Router) error {
 	_ = m.cache.DelRoute(ctx, r.Slug)
 	m.table.Delete(r.Slug)
 	_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
+	m.emitEvent(r.ID, "state_changed", map[string]any{
+		"status":        "stopped",
+		"runtime_state": "stopped",
+		"desired_state": "stopped",
+		"health_status": "unknown",
+		"slug":          r.Slug,
+	})
 	logger.Info("router", r.Slug, fmt.Sprintf("Router container stopped for %s", r.Slug), store.Map{
 		"slug": r.Slug,
 	})
@@ -482,7 +539,15 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 		return err
 	}
 	providers := countProviders(models)
-	return m.store.UpdateRouterCounts(ctx, r.ID, providers, len(models))
+	if err := m.store.UpdateRouterCounts(ctx, r.ID, providers, len(models)); err != nil {
+		return err
+	}
+	m.emitEvent(r.ID, "models_updated", map[string]any{
+		"models_count":    len(models),
+		"providers_count": providers,
+		"slug":            r.Slug,
+	})
+	return nil
 }
 
 // HealthCheck probes the router and records the result.
@@ -493,6 +558,11 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 	}
 	if r.TargetAddr == "" {
 		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", 0, "no target address")
+		m.emitEvent(r.ID, "state_changed", map[string]any{
+			"health_status": "unhealthy",
+			"runtime_state": r.RuntimeState,
+			"slug":          r.Slug,
+		})
 		return fmt.Errorf("no target address")
 	}
 	url := strings.TrimRight(r.TargetAddr, "/") + ad.HealthPath(r)
@@ -502,10 +572,20 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 	if err != nil {
 		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", int(latency), err.Error())
 		_ = m.store.UpdateRouterState(ctx, r.ID, r.RuntimeState, r.TargetAddr, r.ContainerID, r.NativePanelURL, "unhealthy")
+		m.emitEvent(r.ID, "state_changed", map[string]any{
+			"health_status": "unhealthy",
+			"runtime_state": r.RuntimeState,
+			"slug":          r.Slug,
+		})
 		return err
 	}
 	_ = m.store.InsertHealthCheck(ctx, r.ID, "healthy", int(latency), "")
 	_ = m.store.UpdateRouterState(ctx, r.ID, r.RuntimeState, r.TargetAddr, r.ContainerID, r.NativePanelURL, "healthy")
+	m.emitEvent(r.ID, "state_changed", map[string]any{
+		"health_status": "healthy",
+		"runtime_state": r.RuntimeState,
+		"slug":          r.Slug,
+	})
 	return nil
 }
 

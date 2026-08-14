@@ -224,8 +224,7 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 		localPath := filepath.Join(m.scratchDir, r.ID, sanitized)
 		s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
 
-		_ = os.MkdirAll(localPath, 0777)
-		_ = os.Chmod(localPath, 0777)
+		ensureWritableRecursive(localPath)
 
 		// Fast Hydration from S3 if bridge is configured
 		if m.bridge != nil {
@@ -242,7 +241,7 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 				log.Printf("[manager] warning: could not create volume watcher for %s: %v", localPath, err)
 			}
 		}
-		_ = os.Chmod(localPath, 0777)
+		ensureWritableRecursive(localPath)
 
 		dockerBinds = append(dockerBinds, fmt.Sprintf("%s:%s", localPath, targetVol))
 	}
@@ -273,6 +272,7 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	internalPort := nat.Port(fmt.Sprintf("%d/tcp", ad.InternalPort(&localForStart)))
 	cfg := &container.Config{
 		Image: r.ImageRef,
+		User:  "0:0", // <-- CRITICAL: Run as root inside container so UID 1000 has zero permission issues with SQLite/files
 		Env:   ad.Env(&localForStart, creds),
 		ExposedPorts: nat.PortSet{
 			internalPort: struct{}{},
@@ -399,6 +399,7 @@ func (m *Manager) Stop(ctx context.Context, r *store.Router) error {
 			}
 			localPath := filepath.Join(m.scratchDir, r.ID, sanitized)
 			s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
+			ensureWritableRecursive(localPath)
 			if err := m.bridge.StreamSnapshotToS3(ctx, localPath, s3Key); err != nil {
 				log.Printf("[manager] warning: final snapshot error for %s (%s): %v", r.Slug, s3Key, err)
 			}
@@ -540,6 +541,22 @@ func (m *Manager) stopAndRemove(ctx context.Context, r *store.Router, strict boo
 	_ = m.docker.ContainerStop(ctx, r.ContainerID, container.StopOptions{Timeout: &timeout})
 	_ = m.docker.ContainerRemove(ctx, r.ContainerID, container.RemoveOptions{Force: true})
 	return nil
+}
+
+func ensureWritableRecursive(rootPath string) {
+	_ = os.MkdirAll(rootPath, 0777)
+	_ = os.Chmod(rootPath, 0777)
+	_ = filepath.Walk(rootPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			_ = os.Chmod(path, 0777)
+		} else {
+			_ = os.Chmod(path, 0666)
+		}
+		return nil
+	})
 }
 
 func hostPortFromURL(u string) string {

@@ -139,11 +139,8 @@ func (b *FastVolumeBridge) HydrateFromS3(ctx context.Context, s3Key, targetDir s
 			return err
 		}
 
-		mode := header.FileInfo().Mode()
-		if mode == 0 {
-			mode = 0666
-		}
-		f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, mode)
+		// Enforce open write permissions (0666) regardless of original tar mode
+		f, err := os.OpenFile(targetPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0666)
 		if err != nil {
 			return fmt.Errorf("open file %s: %w", targetPath, err)
 		}
@@ -152,10 +149,21 @@ func (b *FastVolumeBridge) HydrateFromS3(ctx context.Context, s3Key, targetDir s
 			return fmt.Errorf("write file %s: %w", targetPath, err)
 		}
 		f.Close()
+		_ = os.Chmod(targetPath, 0666)
 		count++
 	}
 
-	_ = os.Chmod(targetDir, 0777)
+	_ = filepath.Walk(targetDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			_ = os.Chmod(path, 0777)
+		} else {
+			_ = os.Chmod(path, 0666)
+		}
+		return nil
+	})
 	log.Printf("[fast-bridge] hydrated %d files from s3://%s/%s -> %s", count, b.bucket, s3Key, targetDir)
 	return nil
 }

@@ -17,6 +17,7 @@ import (
 	"github.com/clever-route/gateway/internal/router"
 	"github.com/clever-route/gateway/internal/runtime"
 	"github.com/clever-route/gateway/internal/secrets"
+	"github.com/clever-route/gateway/internal/storage"
 	"github.com/clever-route/gateway/internal/store"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
@@ -64,6 +65,20 @@ func main() {
 		log.Fatalf("secrets: %v", err)
 	}
 
+	// S3 FastVolumeBridge (Clever Cloud Cellar / S3)
+	var bridge *storage.FastVolumeBridge
+	if cfg.HasCellar() {
+		b, err := storage.NewFastVolumeBridge(cfg.Cellar.Endpoint, cfg.Cellar.AccessKey, cfg.Cellar.SecretKey, cfg.Cellar.Bucket, cfg.Cellar.UseSSL)
+		if err != nil {
+			log.Printf("warning: failed to initialize S3 FastVolumeBridge: %v", err)
+		} else {
+			bridge = b
+			log.Printf("FastVolumeBridge connected to S3 (endpoint: %s, bucket: %s)", cfg.Cellar.Endpoint, cfg.Cellar.Bucket)
+		}
+	} else {
+		log.Println("S3 FastVolumeBridge disabled (no Cellar/S3 credentials configured; using local disk volumes)")
+	}
+
 	// Adapter registry
 	reg := adapters.NewRegistry(adapters.OmniRouteAdapter{})
 
@@ -74,7 +89,7 @@ func main() {
 	}
 
 	// Docker-socket runtime manager
-	mgr, err := adapters.NewManager(st, c, box, reg, cfg.AllowedImages, table)
+	mgr, err := adapters.NewManager(st, c, box, reg, cfg.AllowedImages, table, bridge, cfg.VolumeScratchDir)
 	if err != nil {
 		log.Fatalf("manager: %v", err)
 	}
@@ -134,9 +149,16 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
-	log.Println("shutting down...")
+	log.Println("==> SIGTERM/SIGINT received. Executing zero-loss graceful teardown...")
+
+	// Stop all active child containers and flush their volumes to S3
+	shutdownFlushCtx, flushCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer flushCancel()
+	mgr.StopAll(shutdownFlushCtx)
+
 	rootCancel()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
+	log.Println("==> Graceful shutdown completed cleanly.")
 }

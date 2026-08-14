@@ -56,13 +56,27 @@ else
     echo "✓ Redis add-on is already linked."
 fi
 
-# 5. Set essential environment variables
+# 5. Create & link Cellar S3 add-on if not already linked
+CELLAR_ADDON="cr-cellar-${ALIAS}"
+echo "🪣 Checking Cellar S3 add-on..."
+if ! clever env --alias "${ALIAS}" | grep -q "CELLAR_ADDON_HOST"; then
+    echo "   Creating Cellar add-on (${CELLAR_ADDON})..."
+    clever addon create cellar-addon "${CELLAR_ADDON}" --yes || true
+    echo "   Linking Cellar add-on..."
+    clever service link-addon "${CELLAR_ADDON}" --alias "${ALIAS}" || true
+else
+    echo "✓ Cellar S3 add-on is already linked."
+fi
+
+# 6. Set essential environment variables
 echo "⚙️ Configuring environment variables..."
 clever env set CC_DOCKER_EXPOSED_HTTP_PORT 8080 --alias "${ALIAS}"
 clever env set CC_HEALTH_CHECK_PATH /healthz --alias "${ALIAS}"
 clever env set CC_MOUNT_DOCKER_SOCKET true --alias "${ALIAS}"
 clever env set APP_ENV "production" --alias "${ALIAS}"
 clever env set ALLOWED_IMAGES "diegosouzapw/omniroute:latest,ghcr.io/berriai/litellm:main-stable" --alias "${ALIAS}"
+clever env set CELLAR_BUCKET "clever-router-storage" --alias "${ALIAS}"
+clever env set VOLUME_SCRATCH_DIR "/tmp/clever_router_volumes" --alias "${ALIAS}"
 
 # Generate and set 64-character hex ENCRYPTION_KEY if missing
 CURRENT_ENC=$(clever env --alias "${ALIAS}" | grep "^ENCRYPTION_KEY=" | cut -d'=' -f2- | tr -d '"' || true)

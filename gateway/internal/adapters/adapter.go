@@ -1,8 +1,10 @@
 package adapters
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/clever-route/gateway/internal/secrets"
 	"github.com/clever-route/gateway/internal/store"
 )
 
@@ -35,6 +37,15 @@ type Adapter interface {
 	// Mounts returns Docker bind/volume specs for router-owned persistent state.
 	// The container filesystem is disposable; these mounts are not.
 	Mounts(r *store.Router) []string
+
+	// DeclaredVolumes returns target directory paths inside the container that
+	// must be persisted across restarts (e.g. ["/app/data"]).
+	DeclaredVolumes(r *store.Router) []string
+
+	// EnsurePermanentSecrets verifies that all required secrets/crypto keys for this
+	// adapter type exist. If missing, it generates them once, encrypts secrets using
+	// box, and returns the full env list and modified=true.
+	EnsurePermanentSecrets(ctx context.Context, r *store.Router, box *secrets.Box) ([]store.EnvVariable, bool)
 
 	// Env returns env vars to inject into the container from decrypted credentials
 	// and router config.

@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -54,6 +55,14 @@ func (OmniRouteAdapter) NativePanelPath(r *store.Router) string {
 	return "/dashboard"
 }
 
+func (OmniRouteAdapter) DeclaredVolumes(r *store.Router) []string {
+	dataPath := strConfig(r, "data_path")
+	if dataPath == "" {
+		dataPath = "/app/data"
+	}
+	return []string{dataPath}
+}
+
 func (OmniRouteAdapter) Mounts(r *store.Router) []string {
 	dataPath := strConfig(r, "data_path")
 	if dataPath == "" {
@@ -61,6 +70,63 @@ func (OmniRouteAdapter) Mounts(r *store.Router) []string {
 	}
 	volume := "clever-route-" + r.Slug
 	return []string{volume + ":" + dataPath}
+}
+
+// EnsurePermanentSecrets checks and generates static cryptographic keys for OmniRoute.
+// Newly generated secrets are encrypted using box so they can be persisted safely to DB.
+func (OmniRouteAdapter) EnsurePermanentSecrets(ctx context.Context, r *store.Router, box *secrets.Box) ([]store.EnvVariable, bool) {
+	envMap := make(map[string]store.EnvVariable)
+	for _, e := range r.EnvVars {
+		envMap[strings.TrimSpace(e.Key)] = e
+	}
+
+	modified := false
+	requiredDefaults := []struct {
+		key       string
+		generator func() string
+		isSecret  bool
+	}{
+		{key: "INITIAL_PASSWORD", generator: func() string { return "AdminSecurePassword123!" }, isSecret: true},
+		{key: "JWT_SECRET", generator: func() string { return secrets.GenerateRandomBase64(48) }, isSecret: true},
+		{key: "API_KEY_SECRET", generator: func() string { return secrets.GenerateRandomHex(32) }, isSecret: true},
+		{key: "OMNIROUTE_WS_BRIDGE_SECRET", generator: func() string { return secrets.GenerateRandomHex(32) }, isSecret: true},
+		{key: "STORAGE_ENCRYPTION_KEY", generator: func() string { return secrets.GenerateRandomHex(32) }, isSecret: true},
+		{key: "STORAGE_ENCRYPTION_KEY_VERSION", generator: func() string { return "v1" }, isSecret: false},
+		{key: "DATA_DIR", generator: func() string {
+			if dp := strConfig(r, "data_path"); dp != "" {
+				return dp
+			}
+			return "/app/data"
+		}, isSecret: false},
+		{key: "NODE_ENV", generator: func() string { return "production" }, isSecret: false},
+	}
+
+	for _, spec := range requiredDefaults {
+		if _, exists := envMap[spec.key]; !exists {
+			val := spec.generator()
+			if spec.isSecret && box != nil {
+				if enc, err := secrets.EncryptValue(box, val); err == nil {
+					val = enc
+				}
+			}
+			envMap[spec.key] = store.EnvVariable{
+				Key:      spec.key,
+				Value:    val,
+				IsSecret: spec.isSecret,
+			}
+			modified = true
+		}
+	}
+
+	if !modified {
+		return r.EnvVars, false
+	}
+
+	result := make([]store.EnvVariable, 0, len(envMap))
+	for _, v := range envMap {
+		result = append(result, v)
+	}
+	return result, true
 }
 
 func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []string {
@@ -77,14 +143,6 @@ func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []stri
 	envMap["PORT"] = port
 	envMap["DATA_DIR"] = dataPath
 
-	// Auto-generate required OmniRoute crypto secrets and baseline defaults if not provided by user
-	envMap["INITIAL_PASSWORD"] = "AdminSecurePassword123!"
-	envMap["JWT_SECRET"] = secrets.GenerateRandomBase64(48)
-	envMap["API_KEY_SECRET"] = secrets.GenerateRandomHex(32)
-	envMap["OMNIROUTE_WS_BRIDGE_SECRET"] = secrets.GenerateRandomHex(32)
-	envMap["STORAGE_ENCRYPTION_KEY"] = secrets.GenerateRandomHex(32)
-	envMap["STORAGE_ENCRYPTION_KEY_VERSION"] = "v1"
-
 	// 2. Legacy router config["env"] (map) if present
 	if cfgEnv, ok := r.Config["env"].(map[string]any); ok {
 		for k, v := range cfgEnv {
@@ -92,10 +150,11 @@ func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []stri
 		}
 	}
 
-	// 3. User-Defined Environment Variables (takes precedence over baseline defaults)
+	// 3. User-Defined & Static Environment Variables (from DB, already decrypted in memory)
 	for _, item := range r.EnvVars {
-		if strings.TrimSpace(item.Key) != "" {
-			envMap[strings.TrimSpace(item.Key)] = item.Value
+		k := strings.TrimSpace(item.Key)
+		if k != "" {
+			envMap[k] = item.Value
 		}
 	}
 

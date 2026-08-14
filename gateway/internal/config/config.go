@@ -18,6 +18,8 @@ type Config struct {
 
 	EncryptionKey string
 
+	VolumeScratchDir string
+
 	Cellar CellarConfig
 
 	DockerSocket string
@@ -40,7 +42,32 @@ type CellarConfig struct {
 	UseSSL    bool
 }
 
+func (c *CellarConfig) Enabled() bool {
+	return c.Endpoint != "" && c.AccessKey != "" && c.SecretKey != ""
+}
+
+func (c *Config) HasCellar() bool {
+	return c.Cellar.Enabled()
+}
+
 func Load() (*Config, error) {
+	// Clean endpoint if host has http:// or https:// prefix
+	rawEndpoint := firstNonEmpty(
+		getenv("CELLAR_ADDON_HOST", ""),
+		getenv("CELLAR_ENDPOINT", ""),
+		getenv("S3_ENDPOINT", ""),
+	)
+	cleanedEndpoint := rawEndpoint
+	useSSL := getbool("CELLAR_SSL", true)
+	if strings.HasPrefix(rawEndpoint, "https://") {
+		cleanedEndpoint = strings.TrimPrefix(rawEndpoint, "https://")
+		useSSL = true
+	} else if strings.HasPrefix(rawEndpoint, "http://") {
+		cleanedEndpoint = strings.TrimPrefix(rawEndpoint, "http://")
+		useSSL = false
+	}
+	cleanedEndpoint = strings.TrimRight(cleanedEndpoint, "/")
+
 	cfg := &Config{
 		HTTPPort:          getenv("PORT", "8080"),
 		EncryptionKey:     getenv("ENCRYPTION_KEY", ""),
@@ -49,13 +76,14 @@ func Load() (*Config, error) {
 		AllowedImages:     splitCSV(getenv("ALLOWED_IMAGES", "diegosouzapw/omniroute:latest,ghcr.io/berriai/litellm:main-stable")),
 		AdminToken:        getenv("ADMIN_API_KEY", ""),
 		Environment:       getenv("APP_ENV", "production"),
+		VolumeScratchDir:  getenv("VOLUME_SCRATCH_DIR", "/tmp/clever_router_volumes"),
 		Cellar: CellarConfig{
-			Endpoint:  getenv("CELLAR_ENDPOINT", getenv("S3_ENDPOINT", "")),
-			AccessKey: getenv("CELLAR_ACCESS_KEY", getenv("AWS_ACCESS_KEY_ID", "")),
-			SecretKey: getenv("CELLAR_SECRET_KEY", getenv("AWS_SECRET_ACCESS_KEY", "")),
-			Bucket:    getenv("CELLAR_BUCKET", getenv("S3_BUCKET", "clever-route")),
+			Endpoint:  cleanedEndpoint,
+			AccessKey: firstNonEmpty(getenv("CELLAR_ADDON_KEY_ID", ""), getenv("CELLAR_ACCESS_KEY", ""), getenv("AWS_ACCESS_KEY_ID", "")),
+			SecretKey: firstNonEmpty(getenv("CELLAR_ADDON_KEY_SECRET", ""), getenv("CELLAR_SECRET_KEY", ""), getenv("AWS_SECRET_ACCESS_KEY", "")),
+			Bucket:    firstNonEmpty(getenv("CELLAR_BUCKET", ""), getenv("S3_BUCKET", ""), "clever-router-storage"),
 			Region:    getenv("CELLAR_REGION", getenv("AWS_REGION", "us-east-1")),
-			UseSSL:    getbool("CELLAR_SSL", true),
+			UseSSL:    useSSL,
 		},
 	}
 

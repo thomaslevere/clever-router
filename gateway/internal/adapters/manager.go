@@ -7,13 +7,17 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/clever-route/gateway/internal/cache"
 	"github.com/clever-route/gateway/internal/logger"
 	"github.com/clever-route/gateway/internal/router"
 	"github.com/clever-route/gateway/internal/secrets"
+	"github.com/clever-route/gateway/internal/storage"
 	"github.com/clever-route/gateway/internal/store"
 	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -36,16 +40,20 @@ const (
 // It owns lifecycle (start/stop), address resolution, persistence mounts,
 // model discovery and health — all driven by the pluggable Adapter contract.
 type Manager struct {
-	store   *store.Store
-	cache   *cache.Cache
-	box     *secrets.Box
-	docker  *client.Client
-	reg     *Registry
-	allowed map[string]bool
-	table   *router.Table
+	store      *store.Store
+	cache      *cache.Cache
+	box        *secrets.Box
+	docker     *client.Client
+	reg        *Registry
+	allowed    map[string]bool
+	table      *router.Table
+	bridge     *storage.FastVolumeBridge
+	scratchDir string
+	watchersMu sync.Mutex
+	watchers   map[string][]*storage.VolumeWatcher
 }
 
-func NewManager(st *store.Store, c *cache.Cache, box *secrets.Box, reg *Registry, allowed []string, table *router.Table) (*Manager, error) {
+func NewManager(st *store.Store, c *cache.Cache, box *secrets.Box, reg *Registry, allowed []string, table *router.Table, bridge *storage.FastVolumeBridge, scratchDir string) (*Manager, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
@@ -54,7 +62,21 @@ func NewManager(st *store.Store, c *cache.Cache, box *secrets.Box, reg *Registry
 	for _, a := range allowed {
 		allow[strings.TrimSpace(a)] = true
 	}
-	m := &Manager{store: st, cache: c, box: box, docker: cli, reg: reg, allowed: allow, table: table}
+	if scratchDir == "" {
+		scratchDir = "/tmp/clever_router_volumes"
+	}
+	m := &Manager{
+		store:      st,
+		cache:      c,
+		box:        box,
+		docker:     cli,
+		reg:        reg,
+		allowed:    allow,
+		table:      table,
+		bridge:     bridge,
+		scratchDir: scratchDir,
+		watchers:   make(map[string][]*storage.VolumeWatcher),
+	}
 
 	// Ensure the dedicated network exists. Best-effort: log on failure.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -67,6 +89,15 @@ func NewManager(st *store.Store, c *cache.Cache, box *secrets.Box, reg *Registry
 }
 
 func (m *Manager) Close() error {
+	m.watchersMu.Lock()
+	for _, ws := range m.watchers {
+		for _, w := range ws {
+			w.Close()
+		}
+	}
+	m.watchers = make(map[string][]*storage.VolumeWatcher)
+	m.watchersMu.Unlock()
+
 	if m.docker != nil {
 		return m.docker.Close()
 	}
@@ -123,6 +154,22 @@ func shortRef(ref string) string {
 	return ref
 }
 
+// InspectImageVolumes queries the Docker daemon for declared VOLUME paths in image metadata.
+func (m *Manager) InspectImageVolumes(ctx context.Context, imageName string) ([]string, error) {
+	insp, _, err := m.docker.ImageInspectWithRaw(ctx, imageName)
+	if err != nil {
+		return nil, err
+	}
+	if insp.Config != nil && len(insp.Config.Volumes) > 0 {
+		vols := make([]string, 0, len(insp.Config.Volumes))
+		for v := range insp.Config.Volumes {
+			vols = append(vols, v)
+		}
+		return vols, nil
+	}
+	return nil, nil
+}
+
 // Start provisions/restarts the router's sibling container and wires its route.
 func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	ad, err := m.reg.Get(r.AdapterType)
@@ -131,6 +178,15 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	}
 	if !m.imageAllowed(r.ImageRef) {
 		return fmt.Errorf("image %q is not in ALLOWED_IMAGES", r.ImageRef)
+	}
+
+	// 1. Ensure permanent crypto keys & secrets are saved to DB
+	if savedEnv, modified := ad.EnsurePermanentSecrets(ctx, r, m.box); modified {
+		if err := m.store.UpdateRouterEnv(ctx, r.ID, savedEnv, r.AutoRestartOnEnvChange); err != nil {
+			log.Printf("[manager] warning: failed to persist permanent router secrets: %v", err)
+		} else {
+			r.EnvVars = savedEnv
+		}
 	}
 
 	// Ensure network exists (re-create if deleted externally).
@@ -146,6 +202,58 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	if err := m.ensureImage(ctx, r.ImageRef); err != nil {
 		return fmt.Errorf("pull image: %w", err)
 	}
+
+	// 2. Discover Volumes from Docker image metadata or adapter contract
+	volumes, _ := m.InspectImageVolumes(ctx, r.ImageRef)
+	if len(volumes) == 0 {
+		volumes = ad.DeclaredVolumes(r)
+	}
+	if len(volumes) == 0 {
+		volumes = []string{"/app/data"}
+	}
+
+	var dockerBinds []string
+	var activeWatchers []*storage.VolumeWatcher
+
+	// 3. Hydrate each volume from S3 & attach real-time inotify watcher
+	for _, targetVol := range volumes {
+		sanitized := strings.TrimPrefix(strings.ReplaceAll(targetVol, "/", "_"), "_")
+		if sanitized == "" {
+			sanitized = "data"
+		}
+		localPath := filepath.Join(m.scratchDir, r.ID, sanitized)
+		s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
+
+		_ = os.MkdirAll(localPath, 0755)
+
+		// Fast Hydration from S3 if bridge is configured
+		if m.bridge != nil {
+			if err := m.bridge.HydrateFromS3(ctx, s3Key, localPath); err != nil {
+				log.Printf("[manager] hydrate warning for %s (%s): %v", r.Slug, s3Key, err)
+			}
+
+			// Attach real-time inotify watcher
+			watcher, err := storage.NewVolumeWatcher(m.bridge, localPath, s3Key, 800*time.Millisecond)
+			if err == nil {
+				watcher.Start(ctx)
+				activeWatchers = append(activeWatchers, watcher)
+			} else {
+				log.Printf("[manager] warning: could not create volume watcher for %s: %v", localPath, err)
+			}
+		}
+
+		dockerBinds = append(dockerBinds, fmt.Sprintf("%s:%s", localPath, targetVol))
+	}
+
+	// Record active watchers for this router ID
+	m.watchersMu.Lock()
+	if oldWatchers, ok := m.watchers[r.ID]; ok {
+		for _, w := range oldWatchers {
+			w.Close()
+		}
+	}
+	m.watchers[r.ID] = activeWatchers
+	m.watchersMu.Unlock()
 
 	creds, err := m.loadCreds(ctx, r)
 	if err != nil {
@@ -175,7 +283,7 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 		},
 	}
 	host := &container.HostConfig{
-		Binds:         ad.Mounts(&localForStart),
+		Binds:         dockerBinds,
 		RestartPolicy: container.RestartPolicy{Name: "unless-stopped"},
 		AutoRemove:    false,
 		PortBindings: nat.PortMap{
@@ -183,8 +291,7 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 				{HostIP: "0.0.0.0", HostPort: ""},
 			},
 		},
-		// GAP-2 FIX: enforce resource limits to prevent a runaway container
-		// from starving the control plane or other routers.
+		// Enforce resource limits to prevent a runaway container from starving the host
 		Resources: container.Resources{
 			Memory:    lim.MemoryBytes,
 			NanoCPUs:  lim.NanoCPUs,
@@ -254,12 +361,48 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	return nil
 }
 
-// Stop removes the router's container and clears its route (state persists in volume).
+// Stop removes the router's container and clears its route, flushing volume snapshots to S3.
 func (m *Manager) Stop(ctx context.Context, r *store.Router) error {
+	// 1. Stop active file watchers for this router
+	m.watchersMu.Lock()
+	if ws, ok := m.watchers[r.ID]; ok {
+		for _, w := range ws {
+			w.Close()
+		}
+		delete(m.watchers, r.ID)
+	}
+	m.watchersMu.Unlock()
+
+	// 2. Stop container gracefully with timeout to allow SQLite WAL flush
 	local := *r
 	if err := m.stopAndRemove(ctx, &local, true); err != nil {
 		return err
 	}
+
+	// 3. Final synchronous flush of all volumes to S3
+	if m.bridge != nil {
+		volumes, _ := m.InspectImageVolumes(ctx, r.ImageRef)
+		if len(volumes) == 0 {
+			if ad, err := m.reg.Get(r.AdapterType); err == nil {
+				volumes = ad.DeclaredVolumes(r)
+			}
+		}
+		if len(volumes) == 0 {
+			volumes = []string{"/app/data"}
+		}
+		for _, targetVol := range volumes {
+			sanitized := strings.TrimPrefix(strings.ReplaceAll(targetVol, "/", "_"), "_")
+			if sanitized == "" {
+				sanitized = "data"
+			}
+			localPath := filepath.Join(m.scratchDir, r.ID, sanitized)
+			s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
+			if err := m.bridge.StreamSnapshotToS3(ctx, localPath, s3Key); err != nil {
+				log.Printf("[manager] warning: final snapshot error for %s (%s): %v", r.Slug, s3Key, err)
+			}
+		}
+	}
+
 	_ = m.store.UpdateRouterState(ctx, r.ID, "stopped", "", "", "", "unknown")
 	_ = m.cache.DelRoute(ctx, r.Slug)
 	m.table.Delete(r.Slug)
@@ -268,6 +411,23 @@ func (m *Manager) Stop(ctx context.Context, r *store.Router) error {
 		"slug": r.Slug,
 	})
 	return nil
+}
+
+// StopAll stops all active router containers and snapshots their volumes before shutdown.
+func (m *Manager) StopAll(ctx context.Context) {
+	routers, err := m.store.ListRouters(ctx)
+	if err != nil {
+		log.Printf("[manager] stop all list routers: %v", err)
+		return
+	}
+	for _, r := range routers {
+		if r.RuntimeState == "running" || r.ContainerID != "" {
+			log.Printf("[manager] stopping router %s and snapshotting state to S3...", r.Slug)
+			if err := m.Stop(ctx, &r); err != nil {
+				log.Printf("[manager] error stopping %s: %v", r.Slug, err)
+			}
+		}
+	}
 }
 
 func (m *Manager) Restart(ctx context.Context, r *store.Router) error {

@@ -2,9 +2,11 @@ package adapters
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/clever-route/gateway/internal/secrets"
 	"github.com/clever-route/gateway/internal/store"
 )
 
@@ -63,21 +65,56 @@ func (OmniRouteAdapter) Mounts(r *store.Router) []string {
 
 func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []string {
 	port := strconv.Itoa(OmniRouteAdapter{}.InternalPort(r))
-	env := []string{
-		"NODE_ENV=production",
-		"PORT=" + port,
+	dataPath := strConfig(r, "data_path")
+	if dataPath == "" {
+		dataPath = "/app/data"
 	}
-	// Pass through any env declared in router config["env"] (map).
+
+	envMap := make(map[string]string)
+
+	// 1. Mandatory Baseline Defaults
+	envMap["NODE_ENV"] = "production"
+	envMap["PORT"] = port
+	envMap["DATA_DIR"] = dataPath
+
+	// Auto-generate crypto secrets if not provided by the user
+	envMap["JWT_SECRET"] = secrets.GenerateRandomHex(32)
+	envMap["API_KEY_SECRET"] = secrets.GenerateRandomHex(32)
+	envMap["STORAGE_ENCRYPTION_KEY"] = secrets.GenerateRandomHex(32)
+	envMap["STORAGE_ENCRYPTION_KEY_VERSION"] = "v1"
+
+	// 2. Legacy router config["env"] (map) if present
 	if cfgEnv, ok := r.Config["env"].(map[string]any); ok {
 		for k, v := range cfgEnv {
-			env = append(env, k+"="+toStr(v))
+			envMap[k] = toStr(v)
 		}
 	}
-	// Inject decrypted credentials as OMNIROUTE_<PROVIDER>_KEY (generic).
-	for provider, key := range decrypted {
-		env = append(env, "OMNIROUTE_"+strings.ToUpper(provider)+"_KEY="+key)
+
+	// 3. User-Defined Environment Variables (takes precedence over baseline defaults)
+	for _, item := range r.EnvVars {
+		if strings.TrimSpace(item.Key) != "" {
+			envMap[strings.TrimSpace(item.Key)] = item.Value
+		}
 	}
-	return env
+
+	// 4. Inject decrypted provider credentials as OMNIROUTE_<PROVIDER>_KEY
+	// and fallback standard provider tokens (e.g. OPENAI_API_KEY) if not already set.
+	for provider, key := range decrypted {
+		upperProv := strings.ToUpper(strings.TrimSpace(provider))
+		envMap["OMNIROUTE_"+upperProv+"_KEY"] = key
+
+		stdKey := upperProv + "_API_KEY"
+		if _, exists := envMap[stdKey]; !exists {
+			envMap[stdKey] = key
+		}
+	}
+
+	// 5. Convert to []string formatted as "KEY=VALUE"
+	finalEnv := make([]string, 0, len(envMap))
+	for k, v := range envMap {
+		finalEnv = append(finalEnv, fmt.Sprintf("%s=%s", k, v))
+	}
+	return finalEnv
 }
 
 // ResourceLimits returns sensible defaults for an OmniRoute container.

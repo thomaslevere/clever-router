@@ -152,14 +152,18 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 		return fmt.Errorf("load credentials: %w", err)
 	}
 
-	lim := ad.ResourceLimits(r)
+	// Decrypt environment variables for container runtime injection
+	localForStart := *r
+	localForStart.EnvVars = m.decryptRouterEnv(r)
+
+	lim := ad.ResourceLimits(&localForStart)
 	pidsLimit := lim.PidsLimit
 
 	name := containerPrefix + r.Slug
-	internalPort := nat.Port(fmt.Sprintf("%d/tcp", ad.InternalPort(r)))
+	internalPort := nat.Port(fmt.Sprintf("%d/tcp", ad.InternalPort(&localForStart)))
 	cfg := &container.Config{
 		Image: r.ImageRef,
-		Env:   ad.Env(r, creds),
+		Env:   ad.Env(&localForStart, creds),
 		ExposedPorts: nat.PortSet{
 			internalPort: struct{}{},
 		},
@@ -171,7 +175,7 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 		},
 	}
 	host := &container.HostConfig{
-		Binds:         ad.Mounts(r),
+		Binds:         ad.Mounts(&localForStart),
 		RestartPolicy: container.RestartPolicy{Name: "unless-stopped"},
 		AutoRemove:    false,
 		PortBindings: nat.PortMap{
@@ -520,6 +524,25 @@ func (m *Manager) loadCreds(ctx context.Context, r *store.Router) (map[string]st
 		out[c.Provider] = string(plain)
 	}
 	return out, nil
+}
+
+func (m *Manager) decryptRouterEnv(r *store.Router) []store.EnvVariable {
+	if len(r.EnvVars) == 0 {
+		return nil
+	}
+	out := make([]store.EnvVariable, len(r.EnvVars))
+	for i, ev := range r.EnvVars {
+		out[i] = ev
+		if ev.IsSecret && secrets.IsEncrypted(ev.Value) {
+			dec, err := secrets.DecryptValue(m.box, ev.Value)
+			if err == nil {
+				out[i].Value = dec
+			} else {
+				log.Printf("[manager] warning: failed to decrypt env var %s for router %s: %v", ev.Key, r.Slug, err)
+			}
+		}
+	}
+	return out
 }
 
 func countProviders(models []store.Model) int {

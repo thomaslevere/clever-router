@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -66,28 +67,38 @@ func (s *Store) GetUserByUsername(ctx context.Context, username string) (*User, 
 	return &u, nil
 }
 
+// EnvVariable represents a single environment key-value pair injected into a router runtime.
+type EnvVariable struct {
+	Key      string `json:"key"`
+	Value    string `json:"value"`     // Decrypted in memory; encrypted at rest when IsSecret is true; masked in UI
+	IsSecret bool   `json:"is_secret"` // When true, value is encrypted in store and masked in UI
+}
+
 // Router is the managed-resource representation of an AI router instance.
 type Router struct {
-	ID             string     `json:"id"`
-	Slug           string     `json:"slug"`
-	Name           string     `json:"name"`
-	AdapterType    string     `json:"adapter_type"`
-	ImageRef       string     `json:"image_ref"`
-	DesiredVersion string     `json:"desired_version"`
-	CurrentVersion string     `json:"current_version"`
-	EndpointPath   string     `json:"endpoint_path"`
-	NativePanelURL string     `json:"native_panel_url"`
-	DesiredState   string     `json:"desired_state"`
-	RuntimeState   string     `json:"runtime_state"`
-	TargetAddr     string     `json:"target_addr"`
-	ContainerID    string     `json:"container_id"`
-	Config         Map        `json:"config"`
-	ProvidersCount int        `json:"providers_count"`
-	ModelsCount    int        `json:"models_count"`
-	HealthStatus   string     `json:"health_status"`
-	LastSeenAt     *time.Time `json:"last_seen_at"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID                     string        `json:"id"`
+	Slug                   string        `json:"slug"`
+	Name                   string        `json:"name"`
+	AdapterType            string        `json:"adapter_type"`
+	ImageRef               string        `json:"image_ref"`
+	DesiredVersion         string        `json:"desired_version"`
+	CurrentVersion         string        `json:"current_version"`
+	EndpointPath           string        `json:"endpoint_path"`
+	NativePanelURL         string        `json:"native_panel_url"`
+	DesiredState           string        `json:"desired_state"`
+	RuntimeState           string        `json:"runtime_state"`
+	TargetAddr             string        `json:"target_addr"`
+	ContainerID            string        `json:"container_id"`
+	Config                 Map           `json:"config"`
+	EnvVars                []EnvVariable `json:"env_vars"`
+	EnvVarsRaw             string        `json:"-"`
+	AutoRestartOnEnvChange bool          `json:"auto_restart_on_env_change"`
+	ProvidersCount         int           `json:"providers_count"`
+	ModelsCount            int           `json:"models_count"`
+	HealthStatus           string        `json:"health_status"`
+	LastSeenAt             *time.Time    `json:"last_seen_at"`
+	CreatedAt              time.Time     `json:"created_at"`
+	UpdatedAt              time.Time     `json:"updated_at"`
 }
 
 type Map = map[string]any
@@ -96,7 +107,8 @@ func (s *Store) ListRouters(ctx context.Context) ([]Router, error) {
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id, slug, name, adapter_type, image_ref, desired_version, current_version,
 		       endpoint_path, native_panel_url, desired_state, runtime_state, target_addr,
-		       container_id, config, providers_count, models_count, health_status,
+		       container_id, config, COALESCE(env_vars, '[]'), COALESCE(auto_restart_on_env_change, false),
+		       providers_count, models_count, health_status,
 		       last_seen_at, created_at, updated_at
 		FROM routers ORDER BY created_at`)
 	if err != nil {
@@ -118,7 +130,8 @@ func (s *Store) GetRouter(ctx context.Context, id string) (*Router, error) {
 	row := s.Pool.QueryRow(ctx, `
 		SELECT id, slug, name, adapter_type, image_ref, desired_version, current_version,
 		       endpoint_path, native_panel_url, desired_state, runtime_state, target_addr,
-		       container_id, config, providers_count, models_count, health_status,
+		       container_id, config, COALESCE(env_vars, '[]'), COALESCE(auto_restart_on_env_change, false),
+		       providers_count, models_count, health_status,
 		       last_seen_at, created_at, updated_at
 		FROM routers WHERE id = $1`, id)
 	r, err := scanRouter(row)
@@ -132,7 +145,8 @@ func (s *Store) GetRouterBySlug(ctx context.Context, slug string) (*Router, erro
 	row := s.Pool.QueryRow(ctx, `
 		SELECT id, slug, name, adapter_type, image_ref, desired_version, current_version,
 		       endpoint_path, native_panel_url, desired_state, runtime_state, target_addr,
-		       container_id, config, providers_count, models_count, health_status,
+		       container_id, config, COALESCE(env_vars, '[]'), COALESCE(auto_restart_on_env_change, false),
+		       providers_count, models_count, health_status,
 		       last_seen_at, created_at, updated_at
 		FROM routers WHERE slug = $1`, slug)
 	r, err := scanRouter(row)
@@ -143,12 +157,20 @@ func (s *Store) GetRouterBySlug(ctx context.Context, slug string) (*Router, erro
 }
 
 func (s *Store) CreateRouter(ctx context.Context, r *Router) error {
+	if r.EnvVarsRaw == "" {
+		if len(r.EnvVars) > 0 {
+			b, _ := json.Marshal(r.EnvVars)
+			r.EnvVarsRaw = string(b)
+		} else {
+			r.EnvVarsRaw = "[]"
+		}
+	}
 	return s.Pool.QueryRow(ctx, `
-		INSERT INTO routers (slug, name, adapter_type, image_ref, desired_version, endpoint_path, desired_state, config)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		INSERT INTO routers (slug, name, adapter_type, image_ref, desired_version, endpoint_path, desired_state, config, env_vars, auto_restart_on_env_change)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		RETURNING id, created_at, updated_at`,
 		r.Slug, r.Name, r.AdapterType, r.ImageRef, r.DesiredVersion, r.EndpointPath,
-		r.DesiredState, r.Config).Scan(&r.ID, &r.CreatedAt, &r.UpdatedAt)
+		r.DesiredState, r.Config, r.EnvVarsRaw, r.AutoRestartOnEnvChange).Scan(&r.ID, &r.CreatedAt, &r.UpdatedAt)
 }
 
 func (s *Store) UpdateRouterState(ctx context.Context, id, runtimeState, targetAddr, containerID, nativePanelURL string, health string) error {
@@ -176,6 +198,17 @@ func (s *Store) UpdateRouter(ctx context.Context, id, name string, config Map) e
 	return err
 }
 
+func (s *Store) UpdateRouterEnv(ctx context.Context, id string, envVars []EnvVariable, autoRestart bool) error {
+	b, err := json.Marshal(envVars)
+	if err != nil {
+		return fmt.Errorf("marshal env_vars: %w", err)
+	}
+	_, err = s.Pool.Exec(ctx, `
+		UPDATE routers SET env_vars=$2, auto_restart_on_env_change=$3, updated_at=now()
+		WHERE id=$1`, id, string(b), autoRestart)
+	return err
+}
+
 func (s *Store) DeleteRouter(ctx context.Context, id string) error {
 	_, err := s.Pool.Exec(ctx, `DELETE FROM routers WHERE id=$1`, id)
 	return err
@@ -188,14 +221,24 @@ type Scanner interface {
 func scanRouter(sc Scanner) (Router, error) {
 	var r Router
 	var lastSeen *time.Time
+	var envVarsRaw string
 	err := sc.Scan(
 		&r.ID, &r.Slug, &r.Name, &r.AdapterType, &r.ImageRef, &r.DesiredVersion, &r.CurrentVersion,
 		&r.EndpointPath, &r.NativePanelURL, &r.DesiredState, &r.RuntimeState, &r.TargetAddr,
-		&r.ContainerID, &r.Config, &r.ProvidersCount, &r.ModelsCount, &r.HealthStatus,
+		&r.ContainerID, &r.Config, &envVarsRaw, &r.AutoRestartOnEnvChange,
+		&r.ProvidersCount, &r.ModelsCount, &r.HealthStatus,
 		&lastSeen, &r.CreatedAt, &r.UpdatedAt,
 	)
+	if err != nil {
+		return r, err
+	}
 	r.LastSeenAt = lastSeen
-	return r, err
+	r.EnvVarsRaw = envVarsRaw
+	r.EnvVars = []EnvVariable{}
+	if envVarsRaw != "" && envVarsRaw != "null" {
+		_ = json.Unmarshal([]byte(envVarsRaw), &r.EnvVars)
+	}
+	return r, nil
 }
 
 // ProviderCredential holds an encrypted API key for a router+provider pair.

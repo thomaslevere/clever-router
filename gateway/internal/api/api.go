@@ -36,6 +36,9 @@ import (
 // slug could cause container name injection or routing conflicts.
 var slugRe = regexp.MustCompile(`^[a-z0-9][a-z0-9\-]{0,61}[a-z0-9]$`)
 
+// envKeyRe validates that environment variable keys follow standard identifier format.
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // reservedSlugs are path prefixes that must never be registered as routers.
 var reservedSlugs = map[string]bool{
 	"admin":   true,

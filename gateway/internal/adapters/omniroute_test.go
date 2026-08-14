@@ -21,14 +21,14 @@ func TestOmniRouteDeterministicSecrets(t *testing.T) {
 		ID:          "router-123",
 		Slug:        "test-router",
 		AdapterType: "omniroute",
-		EnvVars:     []store.EnvVariable{},
+		EnvVars:     nil, // Uninitialized router
 	}
 
-	// 1. Initial creation: should generate permanent secrets
+	// 1. Initial uninitialized router: should generate permanent secrets
 	ctx := context.Background()
 	savedEnv, modified := ad.EnsurePermanentSecrets(ctx, r, box)
 	if !modified {
-		t.Fatalf("expected modified=true on empty initial env")
+		t.Fatalf("expected modified=true on nil initial env")
 	}
 	if len(savedEnv) == 0 {
 		t.Fatalf("expected generated env vars, got 0")
@@ -55,6 +55,21 @@ func TestOmniRouteDeterministicSecrets(t *testing.T) {
 	}
 	if len(savedEnv2) != len(savedEnv) {
 		t.Errorf("env count changed: %d vs %d", len(savedEnv2), len(savedEnv))
+	}
+
+	// 3. Router with explicit empty slice (opted out of presets): should NOT inject presets
+	rEmpty := &store.Router{
+		ID:          "router-empty",
+		Slug:        "empty-router",
+		AdapterType: "omniroute",
+		EnvVars:     []store.EnvVariable{},
+	}
+	savedEmpty, modEmpty := ad.EnsurePermanentSecrets(ctx, rEmpty, box)
+	if modEmpty {
+		t.Errorf("expected modified=false when EnvVars is non-nil empty slice")
+	}
+	if len(savedEmpty) != 0 {
+		t.Errorf("expected 0 env vars for empty slice, got %d", len(savedEmpty))
 	}
 
 	// 3. Env output consistency across multiple calls

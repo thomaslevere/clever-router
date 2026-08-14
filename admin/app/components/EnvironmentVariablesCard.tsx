@@ -32,26 +32,34 @@ export default function EnvironmentVariablesCard({
   const [statusMsg, setStatusMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [copiedExport, setCopiedExport] = useState(false);
 
-  // Sync state if props change
+  // Track if user has modified the form locally so background poll never resets in-progress typing
+  const isDirty = React.useRef(false);
+
+  // Sync state if props change, BUT NEVER if the user has active edits
   useEffect(() => {
-    if (initialEnvVars && initialEnvVars.length > 0) {
+    if (!isDirty.current) {
       setEnvs(initialEnvVars);
     }
   }, [initialEnvVars]);
 
   useEffect(() => {
-    setAutoRestart(autoRestartEnabled);
+    if (!isDirty.current) {
+      setAutoRestart(autoRestartEnabled);
+    }
   }, [autoRestartEnabled]);
 
   const addRow = () => {
+    isDirty.current = true;
     setEnvs((prev) => [...prev, { key: "", value: "", is_secret: false }]);
   };
 
   const removeRow = (index: number) => {
+    isDirty.current = true;
     setEnvs((prev) => prev.filter((_, i) => i !== index));
   };
 
   const updateField = (index: number, field: keyof EnvVariable, val: any) => {
+    isDirty.current = true;
     setEnvs((prev) => {
       const updated = [...prev];
       const item = { ...updated[index], [field]: val };
@@ -71,6 +79,7 @@ export default function EnvironmentVariablesCard({
 
   // Load baseline preset for OmniRoute
   const loadOmniRoutePreset = () => {
+    isDirty.current = true;
     const preset: EnvVariable[] = [
       { key: "INITIAL_PASSWORD", value: "AdminSecurePassword123!", is_secret: true },
       { key: "DATA_DIR", value: "/app/data", is_secret: false },
@@ -96,6 +105,7 @@ export default function EnvironmentVariablesCard({
 
   // Convert raw .env text to structured array
   const parseRawEnv = (text: string) => {
+    isDirty.current = true;
     const lines = text.split("\n");
     const parsed: EnvVariable[] = [];
     for (const line of lines) {
@@ -175,6 +185,8 @@ export default function EnvironmentVariablesCard({
         auto_restart_on_env_change: autoRestart,
         restart_now: restartNow,
       });
+
+      isDirty.current = false; // Reset dirty flag after successful save
 
       setStatusMsg({
         type: "success",

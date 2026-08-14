@@ -220,6 +220,7 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 	g.POST("/routers/:id/stop", a.stopRouter)
 	g.POST("/routers/:id/restart", a.restartRouter)
 	g.POST("/routers/:id/discover", a.discoverRouter)
+	g.GET("/routers/:id/status", a.statusRouter)
 	g.GET("/routers/:id/health", a.healthRouter)
 	g.GET("/routers/:id/models", a.listModels)
 	g.GET("/routers/:id/logs", a.logsRouter)
@@ -718,6 +719,24 @@ func (a *API) discoverRouter(c *gin.Context) {
 		}
 	}()
 	c.JSON(202, gin.H{"ok": true})
+}
+
+func (a *API) statusRouter(c *gin.Context) {
+	r, err := a.findRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	c.JSON(200, gin.H{
+		"id":              r.ID,
+		"slug":            r.Slug,
+		"desired_state":   r.DesiredState,
+		"runtime_state":   r.RuntimeState,
+		"health_status":   r.HealthStatus,
+		"models_count":    r.ModelsCount,
+		"providers_count": r.ProvidersCount,
+		"last_seen_at":    r.LastSeenAt,
+	})
 }
 
 func (a *API) healthRouter(c *gin.Context) {

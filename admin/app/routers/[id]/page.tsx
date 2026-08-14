@@ -46,7 +46,7 @@ export default function RouterDetailPage() {
     }
   }, [r]);
 
-  const load = useCallback(async () => {
+  const loadFull = useCallback(async () => {
     try {
       const [router, ms, cs, envData] = await Promise.all([
         api.get<Router>(`/routers/${id}`),
@@ -73,11 +73,52 @@ export default function RouterDetailPage() {
     }
   }, [id]);
 
+  const pollStatus = useCallback(async () => {
+    try {
+      const [statusData, ms] = await Promise.all([
+        api.get<{
+          id: string;
+          slug: string;
+          desired_state: string;
+          runtime_state: string;
+          health_status: string;
+          models_count: number;
+          providers_count: number;
+          last_seen_at: string | null;
+        }>(`/routers/${id}/status`).catch(() => null),
+        api.get<Model[]>(`/routers/${id}/models`).catch(() => null),
+      ]);
+
+      if (statusData) {
+        setR((prev) => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            desired_state: statusData.desired_state,
+            runtime_state: statusData.runtime_state,
+            health_status: statusData.health_status,
+            models_count: statusData.models_count,
+            providers_count: statusData.providers_count,
+            last_seen_at: statusData.last_seen_at,
+          };
+        });
+      }
+
+      if (ms) {
+        setModels(ms);
+      }
+    } catch (e: any) {
+      if (e instanceof UnauthorizedError) {
+        window.dispatchEvent(new Event("cr:auth-changed"));
+      }
+    }
+  }, [id]);
+
   useEffect(() => {
-    load();
-    const t = setInterval(load, 4000);
+    loadFull();
+    const t = setInterval(pollStatus, 3500);
     return () => clearInterval(t);
-  }, [load]);
+  }, [loadFull, pollStatus]);
 
   async function act(name: string, path: string) {
     setBusy(name);
@@ -87,7 +128,7 @@ export default function RouterDetailPage() {
       setErr(e.message);
     } finally {
       setBusy("");
-      setTimeout(load, 500);
+      setTimeout(loadFull, 500);
     }
   }
 
@@ -100,7 +141,7 @@ export default function RouterDetailPage() {
       });
       setCredProvider("");
       setCredKey("");
-      load();
+      loadFull();
     } catch (e: any) {
       setErr(e.message);
     }
@@ -274,7 +315,7 @@ export default function RouterDetailPage() {
                   onClick={async () => {
                     if (!confirm(`Remove credential for "${c.provider}"?`)) return;
                     await api.del(`/routers/${id}/credentials/${encodeURIComponent(c.provider)}`);
-                    load();
+                    loadFull();
                   }}
                 >
                   Remove
@@ -342,7 +383,7 @@ export default function RouterDetailPage() {
         adapterType={r.adapter_type}
         initialEnvVars={envVars}
         autoRestartEnabled={autoRestart}
-        onUpdated={load}
+        onUpdated={loadFull}
       />
 
       {/* Container Output */}

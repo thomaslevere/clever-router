@@ -72,15 +72,15 @@ func (OmniRouteAdapter) Mounts(r *store.Router) []string {
 	return []string{volume + ":" + dataPath}
 }
 
-// EnsurePermanentSecrets checks and generates static cryptographic keys for OmniRoute.
-// Newly generated secrets are encrypted using box so they can be persisted safely to DB.
+// EnsurePermanentSecrets verifies and generates baseline secrets only for freshly created,
+// uninitialized routers (where r.EnvVars == nil).
+// If the router already has an EnvVars slice configured (even if empty or with deleted keys),
+// it preserves the user's configuration without resurrecting deleted keys.
 func (OmniRouteAdapter) EnsurePermanentSecrets(ctx context.Context, r *store.Router, box *secrets.Box) ([]store.EnvVariable, bool) {
-	envMap := make(map[string]store.EnvVariable)
-	for _, e := range r.EnvVars {
-		envMap[strings.TrimSpace(e.Key)] = e
+	if r.EnvVars != nil {
+		return r.EnvVars, false
 	}
 
-	modified := false
 	requiredDefaults := []struct {
 		key       string
 		generator func() string
@@ -101,30 +101,19 @@ func (OmniRouteAdapter) EnsurePermanentSecrets(ctx context.Context, r *store.Rou
 		{key: "NODE_ENV", generator: func() string { return "production" }, isSecret: false},
 	}
 
+	result := make([]store.EnvVariable, 0, len(requiredDefaults))
 	for _, spec := range requiredDefaults {
-		if _, exists := envMap[spec.key]; !exists {
-			val := spec.generator()
-			if spec.isSecret && box != nil {
-				if enc, err := secrets.EncryptValue(box, val); err == nil {
-					val = enc
-				}
+		val := spec.generator()
+		if spec.isSecret && box != nil {
+			if enc, err := secrets.EncryptValue(box, val); err == nil {
+				val = enc
 			}
-			envMap[spec.key] = store.EnvVariable{
-				Key:      spec.key,
-				Value:    val,
-				IsSecret: spec.isSecret,
-			}
-			modified = true
 		}
-	}
-
-	if !modified {
-		return r.EnvVars, false
-	}
-
-	result := make([]store.EnvVariable, 0, len(envMap))
-	for _, v := range envMap {
-		result = append(result, v)
+		result = append(result, store.EnvVariable{
+			Key:      spec.key,
+			Value:    val,
+			IsSecret: spec.isSecret,
+		})
 	}
 	return result, true
 }

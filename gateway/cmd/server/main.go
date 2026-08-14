@@ -118,7 +118,7 @@ func main() {
 	}
 
 	a := api.New(api.Deps{
-		Cfg: cfg, Store: st, Cache: c, Box: box, Manager: mgr, Table: table,
+		Cfg: cfg, Store: st, Cache: c, Box: box, Manager: mgr, Table: table, Bridge: bridge,
 	})
 	a.Register(r)
 

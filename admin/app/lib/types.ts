@@ -69,3 +69,38 @@ export type Credential = {
   last_verified_at: string | null;
   created_at: string;
 };
+
+export type SystemMetrics = {
+  num_goroutine: number;
+  alloc_mb: number;
+  total_alloc_mb: number;
+  sys_mb: number;
+  num_gc: number;
+  scratch_disk: {
+    total_bytes: number;
+    free_bytes: number;
+    used_bytes: number;
+    used_pct: number;
+  };
+  s3_latency_ms: number;
+  s3_connected: boolean;
+  timestamp: string;
+};
+
+export type FileItem = {
+  name: string;
+  path: string;
+  size: number;
+  is_dir: boolean;
+  mode: string;
+  mod_time: string;
+  extension: string;
+};
+
+export type S3ObjectItem = {
+  key: string;
+  size: number;
+  last_modified: string;
+  etag: string;
+  namespace: string;
+};

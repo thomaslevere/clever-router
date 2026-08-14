@@ -68,6 +68,14 @@ func (b *FastVolumeBridge) getLock(key string) *sync.Mutex {
 	return v.(*sync.Mutex)
 }
 
+// GetRawObject returns a direct S3 object stream from Cellar.
+func (b *FastVolumeBridge) GetRawObject(ctx context.Context, key string) (*minio.Object, error) {
+	if b.client == nil {
+		return nil, fmt.Errorf("minio client not initialized")
+	}
+	return b.client.GetObject(ctx, b.bucket, key, minio.GetObjectOptions{})
+}
+
 // HydrateFromS3 downloads and extracts a .tar.zst archive from S3 into targetDir.
 // If the archive does not exist yet (fresh boot), it returns nil.
 func (b *FastVolumeBridge) HydrateFromS3(ctx context.Context, s3Key, targetDir string) error {

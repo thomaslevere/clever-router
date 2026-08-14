@@ -10,6 +10,7 @@ const navItems = [
   { href: "/", label: "Dashboard", icon: "📊" },
   { href: "/routers", label: "Routers", icon: "⚡" },
   { href: "/keys", label: "Virtual Keys", icon: "🔑" },
+  { href: "/storage", label: "Storage & S3", icon: "💾" },
   { href: "/logs", label: "Live Logs", icon: "📜" },
   { href: "/terminal", label: "Terminal", icon: "💻" },
   { href: "/audit", label: "Audit Log", icon: "🛡️" },

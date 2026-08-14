@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"github.com/clever-route/gateway/internal/proxy"
 	"github.com/clever-route/gateway/internal/router"
 	"github.com/clever-route/gateway/internal/secrets"
+	"github.com/clever-route/gateway/internal/storage"
 	"github.com/clever-route/gateway/internal/store"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/gin-gonic/gin"
@@ -67,6 +69,8 @@ type API struct {
 	rest     *gin.Engine // private engine mounted under /admin/api/* and /api/*
 	logHub   *WSHub
 	auditHub *WSHub
+	bridge   *storage.FastVolumeBridge
+	explorer *storage.StorageExplorer
 }
 
 type Deps struct {
@@ -76,6 +80,7 @@ type Deps struct {
 	Box     *secrets.Box
 	Manager *adapters.Manager
 	Table   *router.Table
+	Bridge  *storage.FastVolumeBridge
 }
 
 func New(d Deps) *API {
@@ -83,6 +88,22 @@ func New(d Deps) *API {
 	auditHub := newWSHub(d.Cache)
 	logHub.StartListening(context.Background(), "events:logs")
 	auditHub.StartListening(context.Background(), "events:audit")
+
+	scratchDir := "/tmp/clever_router_volumes"
+	if d.Cfg != nil && d.Cfg.VolumeScratchDir != "" {
+		scratchDir = d.Cfg.VolumeScratchDir
+	}
+	dataDir := "/tmp/data"
+	if d.Cfg != nil && d.Cfg.PostgresURL != "" {
+		dataDir = "logs"
+	}
+
+	explorer := storage.NewStorageExplorer(d.Bridge, []string{
+		scratchDir,
+		"/tmp/clever_router_volumes",
+		"/tmp/data",
+		dataDir,
+	})
 
 	return &API{
 		cfg:      d.Cfg,
@@ -93,6 +114,8 @@ func New(d Deps) *API {
 		table:    d.Table,
 		logHub:   logHub,
 		auditHub: auditHub,
+		bridge:   d.Bridge,
+		explorer: explorer,
 	}
 }
 
@@ -212,6 +235,18 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 	g.POST("/keys", a.createKey)
 	g.POST("/keys/:id/revoke", a.revokeKey)
 	g.DELETE("/keys/:id", a.deleteKey)
+
+	// Storage, Metrics & Cellar S3 Explorer
+	g.GET("/storage/metrics", a.getStorageMetrics)
+	g.GET("/storage/local/tree", a.listLocalFiles)
+	g.GET("/storage/local/file", a.getLocalFile)
+	g.GET("/storage/local/download", a.downloadLocalFile)
+	g.DELETE("/storage/local/file", a.deleteLocalFile)
+	g.GET("/storage/s3/objects", a.listS3Objects)
+	g.GET("/storage/s3/download", a.downloadS3Object)
+	g.POST("/storage/s3/sync", a.manualS3Sync)
+	g.POST("/storage/s3/restore", a.manualS3Restore)
+	g.DELETE("/storage/s3/object", a.deleteS3Object)
 
 	// Audit + system
 	g.GET("/audit", a.listAudit)
@@ -1136,3 +1171,175 @@ func toMap(v any) store.Map {
 	}
 	return store.Map{"_raw": string(b)}
 }
+
+// ----- storage & cellar s3 management handlers -----
+
+func (a *API) getStorageMetrics(c *gin.Context) {
+	metrics := storage.CollectMetrics(a.bridge, a.cfg.VolumeScratchDir)
+	c.JSON(http.StatusOK, metrics)
+}
+
+func (a *API) listLocalFiles(c *gin.Context) {
+	targetPath := c.Query("path")
+	if targetPath == "" {
+		targetPath = a.cfg.VolumeScratchDir
+	}
+
+	items, err := a.explorer.ListLocalDirectory(targetPath)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, items)
+}
+
+func (a *API) getLocalFile(c *gin.Context) {
+	targetPath := c.Query("path")
+	preview, err := a.explorer.ReadFilePreview(targetPath, 512*1024)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(preview))
+}
+
+func (a *API) downloadLocalFile(c *gin.Context) {
+	targetPath := c.Query("path")
+	safePath, err := a.explorer.ValidatePath(targetPath)
+	if err != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(safePath)))
+	c.File(safePath)
+}
+
+func (a *API) deleteLocalFile(c *gin.Context) {
+	targetPath := c.Query("path")
+	if err := a.explorer.DeleteLocalFile(targetPath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	a.audit(c, "storage.local.delete", "file", targetPath, nil, store.Map{"path": targetPath})
+	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+func (a *API) listS3Objects(c *gin.Context) {
+	if a.bridge == nil {
+		c.JSON(http.StatusOK, []storage.S3ObjectItem{})
+		return
+	}
+	prefix := c.Query("prefix")
+	objects, err := a.explorer.ListS3Objects(c.Request.Context(), prefix)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, objects)
+}
+
+func (a *API) downloadS3Object(c *gin.Context) {
+	key := c.Query("key")
+	if key == "" || a.bridge == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid key or S3 storage disabled"})
+		return
+	}
+
+	obj, err := a.bridge.GetRawObject(c.Request.Context(), key)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer obj.Close()
+
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(key)))
+	c.Header("Content-Type", "application/octet-stream")
+	_, _ = io.Copy(c.Writer, obj)
+}
+
+func (a *API) manualS3Sync(c *gin.Context) {
+	if a.bridge == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cellar S3 storage is not configured"})
+		return
+	}
+
+	var req struct {
+		RouterID string `json:"router_id"`
+	}
+	_ = c.ShouldBindJSON(&req)
+
+	if req.RouterID != "" {
+		r, err := a.findRouter(c, req.RouterID)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "router not found"})
+			return
+		}
+		localPath := filepath.Join(a.cfg.VolumeScratchDir, r.ID, "app_data")
+		s3Key := fmt.Sprintf("namespaces/%s/app_data.tar.zst", r.ID)
+		if err := a.bridge.StreamSnapshotToS3(c.Request.Context(), localPath, s3Key); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("sync failed: %v", err)})
+			return
+		}
+		a.audit(c, "storage.s3.sync", "router", r.ID, nil, store.Map{"slug": r.Slug, "key": s3Key})
+	} else {
+		// StopAll / sync all running routers and logs
+		a.manager.StopAll(c.Request.Context())
+		if err := a.bridge.StreamSnapshotToS3(c.Request.Context(), "logs", "db/gateway_logs.tar.zst"); err != nil {
+			log.Printf("[api] warning syncing logs to S3: %v", err)
+		}
+		a.audit(c, "storage.s3.sync_all", "system", "all", nil, nil)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "synchronized"})
+}
+
+func (a *API) manualS3Restore(c *gin.Context) {
+	if a.bridge == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cellar S3 storage is not configured"})
+		return
+	}
+
+	var req struct {
+		RouterID string `json:"router_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.RouterID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "router_id is required"})
+		return
+	}
+
+	r, err := a.findRouter(c, req.RouterID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "router not found"})
+		return
+	}
+
+	localPath := filepath.Join(a.cfg.VolumeScratchDir, r.ID, "app_data")
+	s3Key := fmt.Sprintf("namespaces/%s/app_data.tar.zst", r.ID)
+	if err := a.bridge.HydrateFromS3(c.Request.Context(), s3Key, localPath); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("restore failed: %v", err)})
+		return
+	}
+
+	a.audit(c, "storage.s3.restore", "router", r.ID, nil, store.Map{"slug": r.Slug, "key": s3Key})
+	c.JSON(http.StatusOK, gin.H{"status": "restored"})
+}
+
+func (a *API) deleteS3Object(c *gin.Context) {
+	if a.bridge == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cellar S3 storage is not configured"})
+		return
+	}
+	key := c.Query("key")
+	if key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "key is required"})
+		return
+	}
+	if err := a.explorer.DeleteS3Object(c.Request.Context(), key); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	a.audit(c, "storage.s3.delete", "object", key, nil, store.Map{"key": key})
+	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+

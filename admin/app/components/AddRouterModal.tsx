@@ -24,7 +24,8 @@ export default function AddRouterModal({
     image_ref: adapters[0].image,
     desired_state: "stopped",
   });
-  const [usePreset, setUsePreset] = useState(true);
+  const [usePreset, setUsePreset] = useState(false);
+  const [adminPassword, setAdminPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -39,12 +40,9 @@ export default function AddRouterModal({
     setErr("");
     try {
       const env_vars =
-        usePreset && form.adapter_type === "omniroute"
+        usePreset && form.adapter_type === "omniroute" && adminPassword.trim() !== ""
           ? [
-              { key: "INITIAL_PASSWORD", value: "AdminSecurePassword123!", is_secret: true },
-              { key: "DATA_DIR", value: "/app/data", is_secret: false },
-              { key: "PORT", value: "20128", is_secret: false },
-              { key: "NODE_ENV", value: "production", is_secret: false },
+              { key: "INITIAL_PASSWORD", value: adminPassword.trim(), is_secret: true },
             ]
           : [];
 
@@ -169,16 +167,41 @@ export default function AddRouterModal({
           </div>
 
           {form.adapter_type === "omniroute" && (
-            <div className="rounded-lg bg-black/5 dark:bg-white/5 p-3 border border-black/5 dark:border-white/5">
-              <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 cursor-pointer select-none font-medium">
-                <input
-                  type="checkbox"
-                  checked={usePreset}
-                  onChange={(e) => setUsePreset(e.target.checked)}
-                  className="rounded border-slate-400 text-brand focus:ring-brand h-4 w-4"
-                />
-                <span>Auto-inject OmniRoute baseline environment presets (INITIAL_PASSWORD, DATA_DIR, PORT)</span>
-              </label>
+            <div className="space-y-3 rounded-lg bg-brand/5 dark:bg-brand/10 p-3.5 border border-brand/20">
+              <div className="flex items-center gap-2 font-semibold text-brand text-xs">
+                <span>🧙‍♂️</span>
+                <span>Interactive Initial Setup Wizard (Default)</span>
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                Starts with clean state and no predefined environment variables. On first launch, open the Native Dashboard to create your initial administrator credentials.
+              </p>
+
+              <div className="pt-2 border-t border-brand/15">
+                <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 cursor-pointer select-none font-medium">
+                  <input
+                    type="checkbox"
+                    checked={usePreset}
+                    onChange={(e) => setUsePreset(e.target.checked)}
+                    className="rounded border-slate-400 text-brand focus:ring-brand h-4 w-4"
+                  />
+                  <span>Bypass wizard with custom predefined admin password</span>
+                </label>
+
+                {usePreset && (
+                  <div className="space-y-1.5 mt-2 pt-2 border-t border-black/5 dark:border-white/5">
+                    <label className="block text-[11px] font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider">
+                      Initial Admin Password
+                    </label>
+                    <input
+                      className="input font-mono text-xs"
+                      type="text"
+                      placeholder="e.g. MySecurePassword123!"
+                      value={adminPassword}
+                      onChange={(e) => setAdminPassword(e.target.value)}
+                    />
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

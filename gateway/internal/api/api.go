@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -220,6 +221,8 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 	g.POST("/routers/:id/stop", a.stopRouter)
 	g.POST("/routers/:id/restart", a.restartRouter)
 	g.POST("/routers/:id/discover", a.discoverRouter)
+	g.POST("/routers/:id/wipe", a.wipeRouter)
+	g.GET("/routers/:id/initial-password", a.getInitialPassword)
 	g.GET("/routers/:id/status", a.statusRouter)
 	g.GET("/routers/:id/health", a.healthRouter)
 	g.GET("/routers/:id/models", a.listModels)
@@ -719,6 +722,93 @@ func (a *API) discoverRouter(c *gin.Context) {
 		}
 	}()
 	c.JSON(202, gin.H{"ok": true})
+}
+
+func (a *API) getInitialPassword(c *gin.Context) {
+	r, err := a.findRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+
+	password := ""
+	for _, ev := range r.EnvVars {
+		if strings.TrimSpace(ev.Key) == "INITIAL_PASSWORD" {
+			val := ev.Value
+			if ev.IsSecret && secrets.IsEncrypted(val) {
+				if dec, err := secrets.DecryptValue(a.box, val); err == nil {
+					password = dec
+				}
+			} else {
+				password = val
+			}
+			break
+		}
+	}
+
+	isDefault := false
+	if password == "" {
+		if r.AdapterType == "omniroute" {
+			password = "CHANGEME"
+			isDefault = true
+		}
+	}
+
+	c.JSON(200, gin.H{
+		"initial_password": password,
+		"is_default":       isDefault,
+		"adapter_type":     r.AdapterType,
+	})
+}
+
+func (a *API) wipeRouter(c *gin.Context) {
+	r, err := a.findRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+
+	// 1. Stop the router container if running
+	if err := a.manager.Stop(c.Request.Context(), r); err != nil {
+		log.Printf("[api] wipe stop warning for %s: %v", r.Slug, err)
+	}
+
+	// 2. Wipe local scratch directory for this router
+	scratchBase := a.cfg.VolumeScratchDir
+	if scratchBase == "" {
+		scratchBase = "/tmp/clever_router_volumes"
+	}
+	localScratch := filepath.Join(scratchBase, r.ID)
+	_ = os.RemoveAll(localScratch)
+
+	// 3. Purge remote S3 namespace snapshots for this router
+	if a.bridge != nil && a.explorer != nil {
+		s3Key := fmt.Sprintf("namespaces/%s/app_data.tar.zst", r.ID)
+		_ = a.explorer.DeleteS3Object(c.Request.Context(), s3Key)
+		if objs, err := a.explorer.ListS3Objects(c.Request.Context(), fmt.Sprintf("namespaces/%s/", r.ID)); err == nil {
+			for _, obj := range objs {
+				_ = a.explorer.DeleteS3Object(c.Request.Context(), obj.Key)
+			}
+		}
+	}
+
+	// 4. Re-create scratch directory with open 0777 permissions
+	_ = os.MkdirAll(localScratch, 0777)
+	_ = os.Chmod(localScratch, 0777)
+
+	// 5. If router desired state was running, restart container with fresh state
+	if r.DesiredState == "running" {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			if err := a.manager.Start(ctx, r); err != nil {
+				log.Printf("[api] wipe restart error for %s: %v", r.Slug, err)
+			}
+		}()
+	}
+
+	a.audit(c, "router.wipe", "router", r.ID, nil, store.Map{"slug": r.Slug})
+	c.JSON(200, gin.H{"status": "wiped", "message": "Router storage purged from local disk and S3. State reset."})
 }
 
 func (a *API) statusRouter(c *gin.Context) {

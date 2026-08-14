@@ -39,6 +39,10 @@ export default function RouterDetailPage() {
   const [credKey, setCredKey] = useState("");
   const [panelUrl, setPanelUrl] = useState("");
   const [copiedUrl, setCopiedUrl] = useState(false);
+  const [initialPassword, setInitialPassword] = useState<string>("");
+  const [isDefaultPassword, setIsDefaultPassword] = useState<boolean>(false);
+  const [copiedPass, setCopiedPass] = useState(false);
+  const [isWiping, setIsWiping] = useState(false);
 
   useEffect(() => {
     if (r) {
@@ -48,13 +52,16 @@ export default function RouterDetailPage() {
 
   const loadFull = useCallback(async () => {
     try {
-      const [router, ms, cs, envData] = await Promise.all([
+      const [router, ms, cs, envData, passData] = await Promise.all([
         api.get<Router>(`/routers/${id}`),
         api.get<Model[]>(`/routers/${id}/models`).catch(() => []),
         api.get<Credential[]>(`/routers/${id}/credentials`).catch(() => []),
         api
           .get<{ env_vars: EnvVariable[]; auto_restart_on_env_change: boolean }>(`/routers/${id}/env`)
           .catch(() => ({ env_vars: [], auto_restart_on_env_change: false })),
+        api
+          .get<{ initial_password: string; is_default: boolean; adapter_type: string }>(`/routers/${id}/initial-password`)
+          .catch(() => null),
       ]);
       setR(router);
       setModels(ms);
@@ -62,6 +69,10 @@ export default function RouterDetailPage() {
       if (envData) {
         setEnvVars(envData.env_vars || []);
         setAutoRestart(!!envData.auto_restart_on_env_change);
+      }
+      if (passData) {
+        setInitialPassword(passData.initial_password);
+        setIsDefaultPassword(passData.is_default);
       }
       setErr("");
     } catch (e: any) {
@@ -177,6 +188,32 @@ export default function RouterDetailPage() {
     }
   }
 
+  async function handleWipe() {
+    const confirmWipe = confirm(
+      `⚠️ WARNING: This will stop ${r?.name || id}, permanently DELETE all SQLite databases in /app/data, and PURGE its Cellar S3 snapshot backups.\n\nAre you sure you want to perform a fresh factory reset?`
+    );
+    if (!confirmWipe) return;
+
+    setIsWiping(true);
+    try {
+      await api.post(`/routers/${id}/wipe`);
+      setErr("");
+      alert("Router storage purged from local disk and S3. Resetting state...");
+      loadFull();
+    } catch (e: any) {
+      setErr(e.message || "Wipe failed");
+    } finally {
+      setIsWiping(false);
+    }
+  }
+
+  function copyPassword() {
+    if (!initialPassword) return;
+    navigator.clipboard.writeText(initialPassword);
+    setCopiedPass(true);
+    setTimeout(() => setCopiedPass(false), 2000);
+  }
+
   useEffect(() => () => logAbort.current?.abort(), []);
 
   if (err && !r) return <div className="card border-red-500/30 text-xs text-red-500 bg-red-500/10 p-4">{err}</div>;
@@ -287,6 +324,80 @@ export default function RouterDetailPage() {
           </div>
         </div>
       </div>
+
+      {/* Native Dashboard Credentials & Factory Reset Banner */}
+      {r.adapter_type === "omniroute" && (
+        <div className={`card p-4 shadow-sm border ${
+          initialPassword
+            ? "bg-amber-500/5 dark:bg-amber-500/10 border-amber-500/20"
+            : "bg-brand/5 dark:bg-brand/10 border-brand/20"
+        }`}>
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className={`grid h-9 w-9 place-items-center rounded-xl text-lg ${
+                initialPassword ? "bg-amber-500/10 text-amber-600 dark:text-amber-400" : "bg-brand/10 text-brand"
+              }`}>
+                {initialPassword ? "🔑" : "🧙‍♂️"}
+              </div>
+              <div>
+                <div className={`text-xs font-bold uppercase tracking-wider ${
+                  initialPassword ? "text-amber-900 dark:text-amber-200" : "text-brand font-semibold"
+                }`}>
+                  {initialPassword ? "Native Dashboard Login Credentials" : "Initial Setup Wizard Ready"}
+                </div>
+                {initialPassword ? (
+                  <div className="flex items-center gap-2 mt-0.5 text-xs text-slate-600 dark:text-slate-300 flex-wrap">
+                    <span>Initial Admin Password:</span>
+                    <code className="px-2 py-0.5 rounded bg-black/5 dark:bg-white/10 font-mono font-bold text-amber-600 dark:text-amber-400 text-xs border border-amber-500/30 select-all">
+                      {initialPassword}
+                    </code>
+                    {isDefaultPassword && (
+                      <span className="text-[11px] text-amber-600/80 italic font-sans">(OmniRoute fallback)</span>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                    No predefined password set. Open the Native Dashboard to complete initial setup and create your admin account.
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {initialPassword ? (
+                <button
+                  type="button"
+                  onClick={copyPassword}
+                  className="btn-secondary text-xs flex items-center gap-1.5 py-1.5 px-3"
+                >
+                  <span>{copiedPass ? "✓" : "📋"}</span>
+                  <span>{copiedPass ? "Copied!" : "Copy Password"}</span>
+                </button>
+              ) : (
+                <a
+                  href={panelUrl || getRouterPanelUrl(r)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn-primary text-xs flex items-center gap-1.5 py-1.5 px-3 shadow-sm"
+                >
+                  <span>Open Setup Wizard ↗</span>
+                </a>
+              )}
+
+              <button
+                type="button"
+                disabled={isWiping}
+                onClick={handleWipe}
+                className="btn text-xs bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400 border border-red-500/30 flex items-center gap-1.5 py-1.5 px-3 transition"
+                title="Purge SQLite state from local disk and Cellar S3, restarting completely fresh into setup wizard"
+              >
+                <span>{isWiping ? "🔄" : "🧹"}</span>
+                <span>{isWiping ? "Wiping..." : "Wipe & Fresh Reset"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Grid: Credentials + Discovered Models */}
       <div className="grid gap-6 md:grid-cols-2">

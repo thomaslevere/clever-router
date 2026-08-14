@@ -24,37 +24,14 @@ func TestOmniRouteDeterministicSecrets(t *testing.T) {
 		EnvVars:     nil, // Uninitialized router
 	}
 
-	// 1. Initial uninitialized router: should generate permanent secrets
+	// 1. Initial uninitialized router: should NOT inject predefined env vars (clean setup wizard)
 	ctx := context.Background()
 	savedEnv, modified := ad.EnsurePermanentSecrets(ctx, r, box)
-	if !modified {
-		t.Fatalf("expected modified=true on nil initial env")
+	if modified {
+		t.Fatalf("expected modified=false to allow clean initial wizard")
 	}
-	if len(savedEnv) == 0 {
-		t.Fatalf("expected generated env vars, got 0")
-	}
-
-	r.EnvVars = savedEnv
-
-	// Check required secrets exist
-	envMap := make(map[string]store.EnvVariable)
-	for _, e := range savedEnv {
-		envMap[e.Key] = e
-	}
-
-	for _, reqKey := range []string{"JWT_SECRET", "API_KEY_SECRET", "STORAGE_ENCRYPTION_KEY", "NODE_ENV", "DATA_DIR"} {
-		if _, exists := envMap[reqKey]; !exists {
-			t.Errorf("missing required secret: %s", reqKey)
-		}
-	}
-
-	// 2. Second call with existing secrets: should NOT modify or regenerate
-	savedEnv2, modified2 := ad.EnsurePermanentSecrets(ctx, r, box)
-	if modified2 {
-		t.Errorf("expected modified=false on existing secrets, got true")
-	}
-	if len(savedEnv2) != len(savedEnv) {
-		t.Errorf("env count changed: %d vs %d", len(savedEnv2), len(savedEnv))
+	if len(savedEnv) != 0 {
+		t.Fatalf("expected 0 generated env vars for clean setup wizard, got %d", len(savedEnv))
 	}
 
 	// 3. Router with explicit empty slice (opted out of presets): should NOT inject presets

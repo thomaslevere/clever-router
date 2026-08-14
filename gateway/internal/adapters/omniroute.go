@@ -72,50 +72,12 @@ func (OmniRouteAdapter) Mounts(r *store.Router) []string {
 	return []string{volume + ":" + dataPath}
 }
 
-// EnsurePermanentSecrets verifies and generates baseline secrets only for freshly created,
-// uninitialized routers (where r.EnvVars == nil).
-// If the router already has an EnvVars slice configured (even if empty or with deleted keys),
-// it preserves the user's configuration without resurrecting deleted keys.
+// EnsurePermanentSecrets verifies environment variables for OmniRoute.
+// It preserves whatever environment variables the user configured and does NOT inject
+// any predefined INITIAL_PASSWORD or preset variables, allowing OmniRoute to launch its
+// native Initial Setup Wizard cleanly on first access.
 func (OmniRouteAdapter) EnsurePermanentSecrets(ctx context.Context, r *store.Router, box *secrets.Box) ([]store.EnvVariable, bool) {
-	if r.EnvVars != nil {
-		return r.EnvVars, false
-	}
-
-	requiredDefaults := []struct {
-		key       string
-		generator func() string
-		isSecret  bool
-	}{
-		{key: "INITIAL_PASSWORD", generator: func() string { return "AdminSecurePassword123!" }, isSecret: true},
-		{key: "JWT_SECRET", generator: func() string { return secrets.GenerateRandomBase64(48) }, isSecret: true},
-		{key: "API_KEY_SECRET", generator: func() string { return secrets.GenerateRandomHex(32) }, isSecret: true},
-		{key: "OMNIROUTE_WS_BRIDGE_SECRET", generator: func() string { return secrets.GenerateRandomHex(32) }, isSecret: true},
-		{key: "STORAGE_ENCRYPTION_KEY", generator: func() string { return secrets.GenerateRandomHex(32) }, isSecret: true},
-		{key: "STORAGE_ENCRYPTION_KEY_VERSION", generator: func() string { return "v1" }, isSecret: false},
-		{key: "DATA_DIR", generator: func() string {
-			if dp := strConfig(r, "data_path"); dp != "" {
-				return dp
-			}
-			return "/app/data"
-		}, isSecret: false},
-		{key: "NODE_ENV", generator: func() string { return "production" }, isSecret: false},
-	}
-
-	result := make([]store.EnvVariable, 0, len(requiredDefaults))
-	for _, spec := range requiredDefaults {
-		val := spec.generator()
-		if spec.isSecret && box != nil {
-			if enc, err := secrets.EncryptValue(box, val); err == nil {
-				val = enc
-			}
-		}
-		result = append(result, store.EnvVariable{
-			Key:      spec.key,
-			Value:    val,
-			IsSecret: spec.isSecret,
-		})
-	}
-	return result, true
+	return r.EnvVars, false
 }
 
 func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []string {

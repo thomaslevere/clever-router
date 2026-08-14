@@ -24,6 +24,7 @@ export default function AddRouterModal({
     image_ref: adapters[0].image,
     desired_state: "stopped",
   });
+  const [usePreset, setUsePreset] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -37,12 +38,23 @@ export default function AddRouterModal({
     setBusy(true);
     setErr("");
     try {
+      const env_vars =
+        usePreset && form.adapter_type === "omniroute"
+          ? [
+              { key: "INITIAL_PASSWORD", value: "AdminSecurePassword123!", is_secret: true },
+              { key: "DATA_DIR", value: "/app/data", is_secret: false },
+              { key: "PORT", value: "20128", is_secret: false },
+              { key: "NODE_ENV", value: "production", is_secret: false },
+            ]
+          : [];
+
       const r = await api.post<Router>("/routers", {
         slug: form.slug,
         name: form.name || form.slug,
         adapter_type: form.adapter_type,
         image_ref: form.image_ref,
         desired_state: form.desired_state,
+        env_vars,
       });
       onCreated(r);
       onClose();
@@ -155,6 +167,20 @@ export default function AddRouterModal({
               Must match the server allowlist (<code className="text-slate-400">ALLOWED_IMAGES</code>).
             </p>
           </div>
+
+          {form.adapter_type === "omniroute" && (
+            <div className="rounded-lg bg-black/5 dark:bg-white/5 p-3 border border-black/5 dark:border-white/5">
+              <label className="flex items-center gap-2 text-xs text-slate-700 dark:text-slate-200 cursor-pointer select-none font-medium">
+                <input
+                  type="checkbox"
+                  checked={usePreset}
+                  onChange={(e) => setUsePreset(e.target.checked)}
+                  className="rounded border-slate-400 text-brand focus:ring-brand h-4 w-4"
+                />
+                <span>Auto-inject OmniRoute baseline environment presets (INITIAL_PASSWORD, DATA_DIR, PORT)</span>
+              </label>
+            </div>
+          )}
 
           {err && (
             <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-2.5 text-xs text-red-500">

@@ -1,3 +1,9 @@
+export type EnvVariable = {
+  key: string;
+  value: string;
+  is_secret: boolean;
+};
+
 export type Router = {
   id: string;
   slug: string;
@@ -13,6 +19,8 @@ export type Router = {
   target_addr: string;
   container_id: string;
   config: Record<string, any>;
+  env_vars?: EnvVariable[];
+  auto_restart_on_env_change?: boolean;
   providers_count: number;
   models_count: number;
   health_status: string;

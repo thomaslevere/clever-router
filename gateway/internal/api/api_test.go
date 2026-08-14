@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/clever-route/gateway/internal/config"
+	"github.com/clever-route/gateway/internal/store"
 	"github.com/gin-gonic/gin"
 )
 
@@ -84,4 +85,62 @@ func TestSingleJSONResponse(t *testing.T) {
 		t.Fatalf("expected exact single body %q, got %q", expected, w.Body.String())
 	}
 }
+
+func TestEnvKeyValidation(t *testing.T) {
+	validKeys := []string{"JWT_SECRET", "API_KEY_SECRET", "INITIAL_PASSWORD", "PORT", "DATA_DIR", "_CUSTOM_VAR", "VAR_123"}
+	for _, k := range validKeys {
+		if !envKeyRe.MatchString(k) {
+			t.Errorf("expected key %q to be valid", k)
+		}
+	}
+
+	invalidKeys := []string{"123VAR", "KEY-WITH-HYPHEN", "KEY.WITH.DOT", "KEY WITH SPACE", "KEY$VAR"}
+	for _, k := range invalidKeys {
+		if envKeyRe.MatchString(k) {
+			t.Errorf("expected key %q to be invalid", k)
+		}
+	}
+}
+
+func TestMaskRouterSecrets(t *testing.T) {
+	r := &store.Router{
+		ID:   "test-id",
+		Slug: "omniroute",
+		EnvVars: []store.EnvVariable{
+			{Key: "PORT", Value: "20128", IsSecret: false},
+			{Key: "JWT_SECRET", Value: "enc:abcdef123456", IsSecret: true},
+			{Key: "INITIAL_PASSWORD", Value: "AdminPass123!", IsSecret: true},
+		},
+	}
+
+	masked := maskRouterSecrets(r)
+	if len(masked.EnvVars) != 3 {
+		t.Fatalf("expected 3 env vars, got %d", len(masked.EnvVars))
+	}
+	if masked.EnvVars[0].Value != "20128" {
+		t.Errorf("expected non-secret value unchanged, got %q", masked.EnvVars[0].Value)
+	}
+	if masked.EnvVars[1].Value != "********" {
+		t.Errorf("expected secret value to be masked, got %q", masked.EnvVars[1].Value)
+	}
+	if masked.EnvVars[2].Value != "********" {
+		t.Errorf("expected secret value to be masked, got %q", masked.EnvVars[2].Value)
+	}
+}
+
+func TestAPIRouting(t *testing.T) {
+	a := newTestAPI(t)
+	r := gin.New()
+	r.Use(gin.Recovery())
+	a.Register(r)
+
+	// Test /api/routers endpoint reaches the router
+	req := httptest.NewRequest(http.MethodGet, "/api/routers", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for unauthenticated /api/routers call, got %d", w.Code)
+	}
+}
+
 

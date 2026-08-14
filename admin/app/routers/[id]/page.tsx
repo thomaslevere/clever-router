@@ -4,8 +4,9 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, UnauthorizedError, getRouterPanelUrl } from "../../lib/api";
-import type { Credential, Model, Router } from "../../lib/types";
+import type { Credential, EnvVariable, Model, Router } from "../../lib/types";
 import DeleteRouterModal from "../../components/DeleteRouterModal";
+import EnvironmentVariablesCard from "../../components/EnvironmentVariablesCard";
 
 function stateBadge(s: string) {
   const map: Record<string, string> = {
@@ -25,6 +26,8 @@ export default function RouterDetailPage() {
   const [r, setR] = useState<Router | null>(null);
   const [models, setModels] = useState<Model[]>([]);
   const [creds, setCreds] = useState<Credential[]>([]);
+  const [envVars, setEnvVars] = useState<EnvVariable[]>([]);
+  const [autoRestart, setAutoRestart] = useState(false);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState("");
   const [logs, setLogs] = useState("");
@@ -45,14 +48,21 @@ export default function RouterDetailPage() {
 
   const load = useCallback(async () => {
     try {
-      const [router, ms, cs] = await Promise.all([
+      const [router, ms, cs, envData] = await Promise.all([
         api.get<Router>(`/routers/${id}`),
         api.get<Model[]>(`/routers/${id}/models`).catch(() => []),
         api.get<Credential[]>(`/routers/${id}/credentials`).catch(() => []),
+        api
+          .get<{ env_vars: EnvVariable[]; auto_restart_on_env_change: boolean }>(`/routers/${id}/env`)
+          .catch(() => ({ env_vars: [], auto_restart_on_env_change: false })),
       ]);
       setR(router);
       setModels(ms);
       setCreds(cs);
+      if (envData) {
+        setEnvVars(envData.env_vars || []);
+        setAutoRestart(!!envData.auto_restart_on_env_change);
+      }
       setErr("");
     } catch (e: any) {
       if (e instanceof UnauthorizedError) {
@@ -324,6 +334,16 @@ export default function RouterDetailPage() {
           </div>
         </div>
       </div>
+
+      {/* Environment Variables & Secrets */}
+      <EnvironmentVariablesCard
+        routerId={r.id}
+        routerSlug={r.slug}
+        adapterType={r.adapter_type}
+        initialEnvVars={envVars}
+        autoRestartEnabled={autoRestart}
+        onUpdated={load}
+      />
 
       {/* Container Output */}
       <div className="card shadow-md p-5 border border-black/10 dark:border-white/10">

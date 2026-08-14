@@ -42,6 +42,7 @@ var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // reservedSlugs are path prefixes that must never be registered as routers.
 var reservedSlugs = map[string]bool{
 	"admin":   true,
+	"api":     true,
 	"healthz": true,
 	"metrics": true,
 }
@@ -63,7 +64,7 @@ type API struct {
 	box      *secrets.Box
 	manager  *adapters.Manager
 	table    *router.Table
-	rest     *gin.Engine // private engine mounted under /admin/api/*
+	rest     *gin.Engine // private engine mounted under /admin/api/* and /api/*
 	logHub   *WSHub
 	auditHub *WSHub
 }
@@ -106,6 +107,10 @@ func (a *API) Register(r *gin.Engine) {
 	r.Any("/admin", a.adminRoot)
 	r.Any("/admin/*any", a.adminRoot)
 
+	// Direct REST API (/api/*)
+	r.Any("/api", a.apiRoot)
+	r.Any("/api/*any", a.apiRoot)
+
 	// Private REST engine. Routes are registered at its root and dispatched by
 	// adminRoot after stripping the /admin/api prefix — this keeps the public
 	// /admin/*any catch-all conflict-free with gin's radix tree.
@@ -142,6 +147,23 @@ func (a *API) adminRoot(c *gin.Context) {
 	a.adminUI(c)
 }
 
+// apiRoot routes /api/* directly to the private REST engine.
+func (a *API) apiRoot(c *gin.Context) {
+	p := c.Request.URL.Path
+	rest := strings.TrimPrefix(p, "/api")
+	if rest == "" {
+		rest = "/"
+	}
+	origPath := c.Request.URL.Path
+	origRawPath := c.Request.URL.RawPath
+	c.Request.URL.Path = rest
+	c.Request.URL.RawPath = ""
+	a.rest.ServeHTTP(c.Writer, c.Request)
+	c.Request.URL.Path = origPath
+	c.Request.URL.RawPath = origRawPath
+	c.Abort()
+}
+
 func (a *API) registerAdmin(g *gin.RouterGroup) {
 	// Authentication
 	g.POST("/auth/login", a.login)
@@ -164,6 +186,11 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 	g.GET("/routers/:id", a.getRouter)
 	g.PATCH("/routers/:id", a.updateRouter)
 	g.DELETE("/routers/:id", a.deleteRouter)
+
+	// Router environment variables
+	g.GET("/routers/:id/env", a.getRouterEnv)
+	g.PUT("/routers/:id/env", a.putRouterEnv)
+	g.POST("/routers/:id/env/apply", a.applyRouterEnv)
 
 	// Router lifecycle
 	g.POST("/routers/:id/start", a.startRouter)
@@ -276,15 +303,43 @@ func (a *API) adminUI(c *gin.Context) {
 
 // ----- routers -----
 
+func (a *API) findRouter(ctx context.Context, idOrSlug string) (*store.Router, error) {
+	r, err := a.store.GetRouter(ctx, idOrSlug)
+	if err == nil && r != nil {
+		return r, nil
+	}
+	return a.store.GetRouterBySlug(ctx, idOrSlug)
+}
+
+func maskRouterSecrets(r *store.Router) store.Router {
+	if r == nil {
+		return store.Router{}
+	}
+	out := *r
+	if len(r.EnvVars) > 0 {
+		masked := make([]store.EnvVariable, len(r.EnvVars))
+		for i, ev := range r.EnvVars {
+			masked[i] = ev
+			if ev.IsSecret {
+				masked[i].Value = "********"
+			}
+		}
+		out.EnvVars = masked
+	}
+	return out
+}
+
 type createRouterReq struct {
-	Slug           string    `json:"slug" binding:"required"`
-	Name           string    `json:"name" binding:"required"`
-	AdapterType    string    `json:"adapter_type" binding:"required"`
-	ImageRef       string    `json:"image_ref" binding:"required"`
-	DesiredVersion string    `json:"desired_version"`
-	EndpointPath   string    `json:"endpoint_path"`
-	DesiredState   string    `json:"desired_state"`
-	Config         store.Map `json:"config"`
+	Slug                   string              `json:"slug" binding:"required"`
+	Name                   string              `json:"name" binding:"required"`
+	AdapterType            string              `json:"adapter_type" binding:"required"`
+	ImageRef               string              `json:"image_ref" binding:"required"`
+	DesiredVersion         string              `json:"desired_version"`
+	EndpointPath           string              `json:"endpoint_path"`
+	DesiredState           string              `json:"desired_state"`
+	Config                 store.Map           `json:"config"`
+	EnvVars                []store.EnvVariable `json:"env_vars"`
+	AutoRestartOnEnvChange bool                `json:"auto_restart_on_env_change"`
 }
 
 func (a *API) listRouters(c *gin.Context) {
@@ -293,7 +348,11 @@ func (a *API) listRouters(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(200, rs)
+	out := make([]store.Router, len(rs))
+	for i, r := range rs {
+		out[i] = maskRouterSecrets(&r)
+	}
+	c.JSON(200, out)
 }
 
 func (a *API) createRouter(c *gin.Context) {
@@ -321,26 +380,57 @@ func (a *API) createRouter(c *gin.Context) {
 	if req.Config == nil {
 		req.Config = store.Map{}
 	}
+
+	// Clean, validate, and encrypt initial env vars
+	cleanedEnv := make([]store.EnvVariable, 0, len(req.EnvVars))
+	for _, item := range req.EnvVars {
+		k := strings.TrimSpace(item.Key)
+		if k == "" {
+			continue
+		}
+		if !envKeyRe.MatchString(k) {
+			c.JSON(400, gin.H{"error": fmt.Sprintf("invalid environment variable key %q: must match ^[A-Za-z_][A-Za-z0-9_]*$", k)})
+			return
+		}
+		val := item.Value
+		if item.IsSecret && !secrets.IsEncrypted(val) {
+			enc, err := secrets.EncryptValue(a.box, val)
+			if err != nil {
+				c.JSON(500, gin.H{"error": fmt.Sprintf("failed to encrypt %s: %v", k, err)})
+				return
+			}
+			val = enc
+		}
+		cleanedEnv = append(cleanedEnv, store.EnvVariable{
+			Key:      k,
+			Value:    val,
+			IsSecret: item.IsSecret,
+		})
+	}
+
 	r := &store.Router{
 		Slug: req.Slug, Name: req.Name, AdapterType: req.AdapterType, ImageRef: req.ImageRef,
 		DesiredVersion: req.DesiredVersion, EndpointPath: req.EndpointPath,
 		DesiredState: req.DesiredState, Config: req.Config,
+		EnvVars: cleanedEnv, AutoRestartOnEnvChange: req.AutoRestartOnEnvChange,
 	}
 	if err := a.store.CreateRouter(c, r); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 	a.audit(c, "router.create", "router", r.ID, nil, store.Map{"slug": r.Slug, "adapter": r.AdapterType, "image": r.ImageRef})
-	c.JSON(201, r)
+	masked := maskRouterSecrets(r)
+	c.JSON(201, masked)
 }
 
 func (a *API) getRouter(c *gin.Context) {
-	r, err := a.store.GetRouter(c, c.Param("id"))
+	r, err := a.findRouter(c, c.Param("id"))
 	if err != nil {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
 	}
-	c.JSON(200, r)
+	masked := maskRouterSecrets(r)
+	c.JSON(200, masked)
 }
 
 func (a *API) updateRouter(c *gin.Context) {
@@ -352,17 +442,21 @@ func (a *API) updateRouter(c *gin.Context) {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	before, _ := a.store.GetRouter(c, c.Param("id"))
-	if err := a.store.UpdateRouter(c, c.Param("id"), req.Name, req.Config); err != nil {
+	before, err := a.findRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	if err := a.store.UpdateRouter(c, before.ID, req.Name, req.Config); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	a.audit(c, "router.update", "router", c.Param("id"), before, store.Map{"name": req.Name, "config": req.Config})
+	a.audit(c, "router.update", "router", before.ID, before, store.Map{"name": req.Name, "config": req.Config})
 	c.JSON(200, gin.H{"ok": true})
 }
 
 func (a *API) deleteRouter(c *gin.Context) {
-	r, err := a.store.GetRouter(c, c.Param("id"))
+	r, err := a.findRouter(c, c.Param("id"))
 	if err != nil {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
@@ -370,16 +464,164 @@ func (a *API) deleteRouter(c *gin.Context) {
 	if r.DesiredState == "running" || r.RuntimeState == "running" {
 		_ = a.manager.Stop(c, r)
 	}
-	if err := a.store.DeleteRouter(c, c.Param("id")); err != nil {
+	if err := a.store.DeleteRouter(c, r.ID); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	a.audit(c, "router.delete", "router", c.Param("id"), r, nil)
+	a.audit(c, "router.delete", "router", r.ID, r, nil)
 	c.JSON(200, gin.H{"ok": true})
 }
 
+// ----- environment variables -----
+
+func (a *API) getRouterEnv(c *gin.Context) {
+	r, err := a.findRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	masked := maskRouterSecrets(r)
+	c.JSON(200, gin.H{
+		"env_vars":                  masked.EnvVars,
+		"auto_restart_on_env_change": r.AutoRestartOnEnvChange,
+	})
+}
+
+type putRouterEnvReq struct {
+	EnvVars                []store.EnvVariable `json:"env_vars"`
+	AutoRestartOnEnvChange *bool               `json:"auto_restart_on_env_change"`
+	RestartNow             bool                `json:"restart_now"`
+}
+
+func (a *API) putRouterEnv(c *gin.Context) {
+	var req putRouterEnvReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	target := c.Param("id")
+	existing, err := a.findRouter(c, target)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+
+	// Index existing secrets by key to preserve unchanged masked values
+	existingSecrets := make(map[string]store.EnvVariable, len(existing.EnvVars))
+	for _, ev := range existing.EnvVars {
+		existingSecrets[ev.Key] = ev
+	}
+
+	cleanedEnv := make([]store.EnvVariable, 0, len(req.EnvVars))
+	for _, item := range req.EnvVars {
+		k := strings.TrimSpace(item.Key)
+		if k == "" {
+			continue
+		}
+		if !envKeyRe.MatchString(k) {
+			c.JSON(400, gin.H{"error": fmt.Sprintf("invalid environment variable key %q: must match ^[A-Za-z_][A-Za-z0-9_]*$", k)})
+			return
+		}
+
+		val := item.Value
+		if item.IsSecret {
+			// Check if value is masked placeholder ("********" or "****")
+			if val == "********" || val == "****" {
+				if ex, ok := existingSecrets[k]; ok {
+					val = ex.Value // keep existing encrypted/plaintext value
+				} else {
+					enc, err := secrets.EncryptValue(a.box, "")
+					if err != nil {
+						c.JSON(500, gin.H{"error": "encryption error"})
+						return
+					}
+					val = enc
+				}
+			} else if !secrets.IsEncrypted(val) {
+				enc, err := secrets.EncryptValue(a.box, val)
+				if err != nil {
+					c.JSON(500, gin.H{"error": fmt.Sprintf("failed to encrypt %s: %v", k, err)})
+					return
+				}
+				val = enc
+			}
+		} else {
+			// Non-secret: decrypt if it was previously encrypted
+			if secrets.IsEncrypted(val) {
+				dec, err := secrets.DecryptValue(a.box, val)
+				if err == nil {
+					val = dec
+				}
+			}
+		}
+
+		cleanedEnv = append(cleanedEnv, store.EnvVariable{
+			Key:      k,
+			Value:    val,
+			IsSecret: item.IsSecret,
+		})
+	}
+
+	autoRestart := existing.AutoRestartOnEnvChange
+	if req.AutoRestartOnEnvChange != nil {
+		autoRestart = *req.AutoRestartOnEnvChange
+	}
+
+	if err := a.store.UpdateRouterEnv(c, existing.ID, cleanedEnv, autoRestart); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	a.audit(c, "router.env.update", "router", existing.ID, nil, store.Map{
+		"env_vars_count": len(cleanedEnv),
+		"auto_restart":   autoRestart,
+		"restart_now":    req.RestartNow,
+	})
+
+	shouldRestart := req.RestartNow || (autoRestart && (existing.RuntimeState == "running" || existing.DesiredState == "running"))
+	if shouldRestart {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			if rUpdated, err := a.store.GetRouter(ctx, existing.ID); err == nil {
+				if err := a.manager.Restart(ctx, rUpdated); err != nil {
+					log.Printf("[api] restart after env update %s: %v", rUpdated.Slug, err)
+				}
+			}
+		}()
+	}
+
+	c.JSON(200, gin.H{
+		"ok":                true,
+		"restart_triggered": shouldRestart,
+	})
+}
+
+func (a *API) applyRouterEnv(c *gin.Context) {
+	target := c.Param("id")
+	r, err := a.findRouter(c, target)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if rUpdated, err := a.store.GetRouter(ctx, r.ID); err == nil {
+			if err := a.manager.Restart(ctx, rUpdated); err != nil {
+				log.Printf("[api] apply env restart %s: %v", rUpdated.Slug, err)
+			}
+		}
+	}()
+
+	a.audit(c, "router.env.apply", "router", r.ID, nil, nil)
+	c.JSON(202, gin.H{"ok": true, "state": "restarting"})
+}
+
 func (a *API) startRouter(c *gin.Context) {
-	r, err := a.store.GetRouter(c, c.Param("id"))
+	r, err := a.findRouter(c, c.Param("id"))
 	if err != nil {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
@@ -397,7 +639,7 @@ func (a *API) startRouter(c *gin.Context) {
 }
 
 func (a *API) stopRouter(c *gin.Context) {
-	r, err := a.store.GetRouter(c, c.Param("id"))
+	r, err := a.findRouter(c, c.Param("id"))
 	if err != nil {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
@@ -413,7 +655,7 @@ func (a *API) stopRouter(c *gin.Context) {
 }
 
 func (a *API) restartRouter(c *gin.Context) {
-	r, err := a.store.GetRouter(c, c.Param("id"))
+	r, err := a.findRouter(c, c.Param("id"))
 	if err != nil {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
@@ -430,7 +672,7 @@ func (a *API) restartRouter(c *gin.Context) {
 }
 
 func (a *API) discoverRouter(c *gin.Context) {
-	r, err := a.store.GetRouter(c, c.Param("id"))
+	r, err := a.findRouter(c, c.Param("id"))
 	if err != nil {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
@@ -444,7 +686,7 @@ func (a *API) discoverRouter(c *gin.Context) {
 }
 
 func (a *API) healthRouter(c *gin.Context) {
-	r, err := a.store.GetRouter(c, c.Param("id"))
+	r, err := a.findRouter(c, c.Param("id"))
 	if err != nil {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
@@ -458,7 +700,12 @@ func (a *API) healthRouter(c *gin.Context) {
 }
 
 func (a *API) listModels(c *gin.Context) {
-	ms, err := a.store.ListModels(c, c.Param("id"))
+	r, err := a.findRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	ms, err := a.store.ListModels(c, r.ID)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
@@ -472,7 +719,7 @@ func (a *API) listModels(c *gin.Context) {
 // binary prefixes in the browser. stdcopy.StdCopy demultiplexes stdout/stderr
 // and writes clean UTF-8 lines to the pipe consumed by the SSE stream.
 func (a *API) logsRouter(c *gin.Context) {
-	r, err := a.store.GetRouter(c, c.Param("id"))
+	r, err := a.findRouter(c, c.Param("id"))
 	if err != nil || r.ContainerID == "" {
 		c.JSON(404, gin.H{"error": "router not running"})
 		return

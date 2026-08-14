@@ -77,9 +77,11 @@ func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []stri
 	envMap["PORT"] = port
 	envMap["DATA_DIR"] = dataPath
 
-	// Auto-generate crypto secrets if not provided by the user
-	envMap["JWT_SECRET"] = secrets.GenerateRandomHex(32)
+	// Auto-generate required OmniRoute crypto secrets and baseline defaults if not provided by user
+	envMap["INITIAL_PASSWORD"] = "AdminSecurePassword123!"
+	envMap["JWT_SECRET"] = secrets.GenerateRandomBase64(48)
 	envMap["API_KEY_SECRET"] = secrets.GenerateRandomHex(32)
+	envMap["OMNIROUTE_WS_BRIDGE_SECRET"] = secrets.GenerateRandomHex(32)
 	envMap["STORAGE_ENCRYPTION_KEY"] = secrets.GenerateRandomHex(32)
 	envMap["STORAGE_ENCRYPTION_KEY_VERSION"] = "v1"
 

@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -13,7 +14,7 @@ import (
 // Box is an AES-256-GCM envelope encryptor. The data key is injected via env at
 // deploy time and is never committed.
 type Box struct {
-	gcm  cipher.AEAD
+	gcm   cipher.AEAD
 	keyID string
 }
 
@@ -70,7 +71,7 @@ func GenerateRandomBase64(n int) string {
 	if _, err := io.ReadFull(rand.Reader, buf); err != nil {
 		return ""
 	}
-	return hex.EncodeToString(buf) // safe alphanumeric / hex representation
+	return base64.RawURLEncoding.EncodeToString(buf)
 }
 
 // IsEncrypted returns true if the value starts with the encrypted value prefix.

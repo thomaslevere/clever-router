@@ -568,29 +568,34 @@ func (m *Manager) getCandidates(ctx context.Context, containerID string, port in
 
 	internalPort := nat.Port(fmt.Sprintf("%d/tcp", port))
 	var candidates []string
+	seen := make(map[string]bool)
 
-	// 1. Direct container IPs (preferred for bridge container-to-container routing)
-	if insp.NetworkSettings != nil {
-		if n, ok := insp.NetworkSettings.Networks["bridge"]; ok && n.IPAddress != "" {
-			candidates = append(candidates, fmt.Sprintf("http://%s:%d", n.IPAddress, port))
-		}
-		if insp.NetworkSettings.IPAddress != "" {
-			candidates = append(candidates, fmt.Sprintf("http://%s:%d", insp.NetworkSettings.IPAddress, port))
-		}
-		for _, n := range insp.NetworkSettings.Networks {
-			if n.IPAddress != "" {
-				candidates = append(candidates, fmt.Sprintf("http://%s:%d", n.IPAddress, port))
-			}
+	addCand := func(c string) {
+		if c != "" && !seen[c] {
+			seen[c] = true
+			candidates = append(candidates, c)
 		}
 	}
 
-	// 2. Published host ports
+	// 1. Direct container IP from networks (preferred for bridge container-to-container routing)
+	if insp.NetworkSettings != nil {
+		for _, n := range insp.NetworkSettings.Networks {
+			if n.IPAddress != "" {
+				addCand(fmt.Sprintf("http://%s:%d", n.IPAddress, port))
+			}
+		}
+		if insp.NetworkSettings.IPAddress != "" {
+			addCand(fmt.Sprintf("http://%s:%d", insp.NetworkSettings.IPAddress, port))
+		}
+	}
+
+	// 2. Published host ports (fallback if bridge IP is unreachable)
 	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
-		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok && len(bindings) > 0 {
+		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok {
 			for _, b := range bindings {
 				if b.HostPort != "" {
-					candidates = append(candidates, fmt.Sprintf("http://127.0.0.1:%s", b.HostPort))
-					candidates = append(candidates, fmt.Sprintf("http://%s:%s", gatewayIP, b.HostPort))
+					addCand(fmt.Sprintf("http://127.0.0.1:%s", b.HostPort))
+					addCand(fmt.Sprintf("http://%s:%s", gatewayIP, b.HostPort))
 				}
 			}
 		}
@@ -629,9 +634,16 @@ func networkNames(ns *dockertypes.NetworkSettings) []string {
 // waitForHealthy probes the router's health endpoint across candidate addresses with exponential backoff.
 func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapter, containerID string, port int, maxWait time.Duration) (string, bool) {
 	deadline := time.Now().Add(maxWait)
-	interval := 500 * time.Millisecond
-	const maxInterval = 5 * time.Second
-	probeClient := &http.Client{Timeout: 3 * time.Second}
+	interval := 400 * time.Millisecond
+	const maxInterval = 3 * time.Second
+	probeClient := &http.Client{Timeout: 1500 * time.Millisecond}
+
+	// Warm-up grace period: Give container process 1.5 seconds to load runtime before first probe
+	select {
+	case <-ctx.Done():
+		return "", false
+	case <-time.After(1500 * time.Millisecond):
+	}
 
 	for time.Now().Before(deadline) {
 		candidates := m.getCandidates(ctx, containerID, port)
@@ -643,12 +655,10 @@ func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapte
 				if err == nil {
 					status := resp.StatusCode
 					resp.Body.Close()
-					log.Printf("[health-check] %s candidate %s -> HTTP %d", r.Slug, cand, status)
 					if status < 500 {
+						log.Printf("[health-check] %s verified healthy at %s (HTTP %d)", r.Slug, cand, status)
 						return cand, true
 					}
-				} else {
-					log.Printf("[health-check] %s candidate %s -> err: %v", r.Slug, cand, err)
 				}
 			}
 		}
@@ -666,9 +676,10 @@ func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapte
 		case <-time.After(sleep):
 		}
 		if interval < maxInterval {
-			interval *= 2
+			interval = time.Duration(float64(interval) * 1.5)
 		}
 	}
+	log.Printf("[health-check] %s failed to become healthy within %v", r.Slug, maxWait)
 	return "", false
 }
 

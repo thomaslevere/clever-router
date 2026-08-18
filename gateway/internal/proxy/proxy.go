@@ -286,12 +286,12 @@ func (p *Proxy) Handle(c *gin.Context) {
 	sc := newUsageScanner(model)
 	flusher, _ := c.Writer.(http.Flusher)
 
-	// HTML Content: Inject <base href="/<slug>/" /> tag to ensure relative assets and SPA routing resolve within the subpath
+	// HTML Content: Transform Next.js routing metadata, asset paths, and inject <base> guard
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	if strings.Contains(contentType, "text/html") {
 		rawHTML, err := io.ReadAll(resp.Body)
 		if err == nil {
-			modifiedHTML := p.injectHTMLBase(rawHTML, targetSlug)
+			modifiedHTML := p.transformHTML(rawHTML, targetSlug)
 			c.Writer.Header().Set("Content-Length", strconv.Itoa(len(modifiedHTML)))
 			c.Writer.WriteHeader(resp.StatusCode)
 			_, _ = c.Writer.Write(modifiedHTML)
@@ -368,39 +368,78 @@ func (p *Proxy) rewriteLocation(loc, slug string) string {
 	return loc
 }
 
-// injectHTMLBase inserts <base href="/<slug>/" /> right after <head>
-func (p *Proxy) injectHTMLBase(raw []byte, slug string) []byte {
-	if bytes.Contains(bytes.ToLower(raw), []byte("<base ")) {
+// transformHTML patches Next.js client routing metadata, rewrites absolute asset URLs, and injects <base> guard
+func (p *Proxy) transformHTML(raw []byte, slug string) []byte {
+	if len(raw) == 0 || slug == "" {
 		return raw
 	}
-	baseTag := []byte(fmt.Sprintf(`<base href="/%s/" />`, slug))
+	prefix := "/" + slug
+	htmlStr := string(raw)
 
-	// Find <head> or <HEAD>
-	idx := bytes.Index(bytes.ToLower(raw), []byte("<head>"))
-	if idx != -1 {
+	// 1. Rewrite Next.js __NEXT_DATA__ JSON configuration to align client-side router
+	if strings.Contains(htmlStr, `id="__NEXT_DATA__"`) {
+		htmlStr = strings.ReplaceAll(htmlStr, `"basePath":""`, fmt.Sprintf(`"basePath":"%s"`, prefix))
+		htmlStr = strings.ReplaceAll(htmlStr, `"basePath": null`, fmt.Sprintf(`"basePath":"%s"`, prefix))
+		htmlStr = strings.ReplaceAll(htmlStr, `"basePath":null`, fmt.Sprintf(`"basePath":"%s"`, prefix))
+		htmlStr = strings.ReplaceAll(htmlStr, `"assetPrefix":""`, fmt.Sprintf(`"assetPrefix":"%s"`, prefix))
+		htmlStr = strings.ReplaceAll(htmlStr, `"assetPrefix": null`, fmt.Sprintf(`"assetPrefix":"%s"`, prefix))
+		htmlStr = strings.ReplaceAll(htmlStr, `"assetPrefix":null`, fmt.Sprintf(`"assetPrefix":"%s"`, prefix))
+	}
+
+	// 2. Rewrite root asset attributes in HTML so bundles and styles load under the subpath
+	htmlStr = strings.ReplaceAll(htmlStr, `src="/_next/`, fmt.Sprintf(`src="%s/_next/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/_next/`, fmt.Sprintf(`href="%s/_next/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `src="/static/`, fmt.Sprintf(`src="%s/static/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/static/`, fmt.Sprintf(`href="%s/static/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `src="/assets/`, fmt.Sprintf(`src="%s/assets/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/assets/`, fmt.Sprintf(`href="%s/assets/`, prefix))
+
+	// 3. Inject <base> tag and client-side history guard into <head>
+	clientGuardScript := fmt.Sprintf(`<base href="%s/" /><script>
+window.__BASE_PATH__ = "%s";
+window.__ROUTER_SLUG__ = "%s";
+(function(){
+  try {
+    if (window.__NEXT_DATA__) {
+      window.__NEXT_DATA__.basePath = "%s";
+      window.__NEXT_DATA__.assetPrefix = "%s";
+    }
+  } catch(e){}
+  if (typeof history !== "undefined") {
+    var p = "%s";
+    var origPush = history.pushState;
+    var origReplace = history.replaceState;
+    history.pushState = function(state, title, url) {
+      if (typeof url === "string" && url.startsWith("/") && !url.startsWith(p)) {
+        url = p + url;
+      }
+      return origPush.apply(this, [state, title, url]);
+    };
+    history.replaceState = function(state, title, url) {
+      if (typeof url === "string" && url.startsWith("/") && !url.startsWith(p)) {
+        url = p + url;
+      }
+      return origReplace.apply(this, [state, title, url]);
+    };
+  }
+})();
+</script>`, prefix, prefix, slug, prefix, prefix, prefix)
+
+	// Inject into <head>
+	lowerHTML := strings.ToLower(htmlStr)
+	if idx := strings.Index(lowerHTML, "<head>"); idx != -1 {
 		pos := idx + len("<head>")
-		var buf bytes.Buffer
-		buf.Write(raw[:pos])
-		buf.Write(baseTag)
-		buf.Write(raw[pos:])
-		return buf.Bytes()
-	}
-
-	// Find <head ...>
-	idx = bytes.Index(bytes.ToLower(raw), []byte("<head"))
-	if idx != -1 {
-		endIdx := bytes.IndexByte(raw[idx:], '>')
-		if endIdx != -1 {
+		htmlStr = htmlStr[:pos] + clientGuardScript + htmlStr[pos:]
+	} else if idx := strings.Index(lowerHTML, "<head"); idx != -1 {
+		if endIdx := strings.IndexByte(htmlStr[idx:], '>'); endIdx != -1 {
 			pos := idx + endIdx + 1
-			var buf bytes.Buffer
-			buf.Write(raw[:pos])
-			buf.Write(baseTag)
-			buf.Write(raw[pos:])
-			return buf.Bytes()
+			htmlStr = htmlStr[:pos] + clientGuardScript + htmlStr[pos:]
 		}
+	} else {
+		htmlStr = clientGuardScript + htmlStr
 	}
 
-	return raw
+	return []byte(htmlStr)
 }
 
 func (p *Proxy) findFallbackRouter(c *gin.Context) (string, string) {

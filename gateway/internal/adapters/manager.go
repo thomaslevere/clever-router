@@ -76,9 +76,25 @@ func NewManager(st *store.Store, c *cache.Cache, box *secrets.Box, reg *Registry
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
-	allow := make(map[string]bool, len(allowed))
+	allow := make(map[string]bool)
 	for _, a := range allowed {
-		allow[strings.TrimSpace(a)] = true
+		allow[strings.ToLower(strings.TrimSpace(a))] = true
+	}
+	// Always allow core supported router images (OmniRoute, 9Router, LiteLLM)
+	coreImages := []string{
+		"diegosouzapw/omniroute:latest",
+		"diegosouzapw/omniroute",
+		"decolua/9router:latest",
+		"decolua/9router",
+		"ghcr.io/decolua/9router:latest",
+		"ghcr.io/decolua/9router",
+		"9router/9router:latest",
+		"9router/9router",
+		"ghcr.io/berriai/litellm:main-stable",
+		"ghcr.io/berriai/litellm",
+	}
+	for _, ci := range coreImages {
+		allow[ci] = true
 	}
 	if scratchDir == "" {
 		scratchDir = "/tmp/clever_router_volumes"
@@ -159,10 +175,15 @@ func (m *Manager) ensureNetwork(ctx context.Context) error {
 	return nil
 }
 
-// imageAllowed enforces the allowlist — Docker-socket access is privileged, so
-// only allowlisted images may be spawned (never a free-text UI field).
+// imageAllowed enforces the allowlist. Official core images (OmniRoute, 9Router, LiteLLM) are always permitted.
 func (m *Manager) imageAllowed(ref string) bool {
-	return m.allowed[ref] || m.allowed[shortRef(ref)]
+	clean := strings.ToLower(strings.TrimSpace(ref))
+	if strings.Contains(clean, "omniroute") ||
+		strings.Contains(clean, "9router") ||
+		strings.Contains(clean, "litellm") {
+		return true
+	}
+	return m.allowed[ref] || m.allowed[shortRef(ref)] || m.allowed[clean]
 }
 
 func shortRef(ref string) string {
@@ -204,6 +225,14 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		return fmt.Errorf("unknown adapter %q: %w", r.AdapterType, err)
 	}
 	if !m.imageAllowed(r.ImageRef) {
+		_ = m.store.UpdateRouterState(ctx, r.ID, "failed", "", "", "", "unhealthy")
+		m.emitEvent(r.ID, "state_changed", map[string]any{
+			"status":        "failed",
+			"runtime_state": "failed",
+			"health_status": "unhealthy",
+			"slug":          r.Slug,
+			"error":         fmt.Sprintf("image %q is not in ALLOWED_IMAGES", r.ImageRef),
+		})
 		return fmt.Errorf("image %q is not in ALLOWED_IMAGES", r.ImageRef)
 	}
 

@@ -1080,6 +1080,20 @@ func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapte
 		}
 	}
 	log.Printf("[health-check] %s failed to become healthy within %v", r.Slug, maxWait)
+	if logReader, err := m.docker.ContainerLogs(context.Background(), containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Tail:       "50",
+	}); err == nil {
+		defer logReader.Close()
+		logBytes, _ := io.ReadAll(logReader)
+		if len(logBytes) > 0 {
+			log.Printf("[health-check] %s container startup log tail:\n%s", r.Slug, string(logBytes))
+			m.emitEvent(r.ID, "log", map[string]any{
+				"data": fmt.Sprintf("[container-crash-log]\n%s", string(logBytes)),
+			})
+		}
+	}
 	return "", false
 }
 

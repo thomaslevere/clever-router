@@ -432,6 +432,17 @@ func (b *FastVolumeBridge) HydrateContainerCandidateKeys(ctx context.Context, cl
 					continue
 				}
 
+				// Protect container executable code from corrupted /app snapshots:
+				// If targetParentDir is "/app" or "/", never overwrite node_modules, package.json, server.js, index.js, bin, etc.
+				if targetParentDir == "/app" || targetParentDir == "/" {
+					topSegment := strings.Split(cleaned, "/")[0]
+					if topSegment == "node_modules" || topSegment == "package.json" || topSegment == "package-lock.json" ||
+						topSegment == "server.js" || topSegment == "index.js" || topSegment == "bin" || topSegment == "dist" ||
+						topSegment == ".next" || topSegment == "build" || topSegment == "src" {
+						continue
+					}
+				}
+
 				// Normalize UID and GID to 0 (root) so Docker userns remap never rejects the archive
 				header.Uid = 0
 				header.Gid = 0

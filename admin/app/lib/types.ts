@@ -1,3 +1,5 @@
+export type ProviderType = "omniroute" | "9router" | "freellmapi" | "litellm" | "custom";
+
 export type EnvVariable = {
   key: string;
   value: string;
@@ -9,10 +11,12 @@ export type Router = {
   slug: string;
   name: string;
   adapter_type: string;
+  provider_type?: string;
   image_ref: string;
   desired_version: string;
   current_version: string;
   endpoint_path: string;
+  route_path?: string;
   native_panel_url: string;
   desired_state: string;
   runtime_state: string;

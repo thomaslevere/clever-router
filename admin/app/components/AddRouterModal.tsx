@@ -34,7 +34,13 @@ export default function AddRouterModal({
 
   function pickAdapter(v: string) {
     const a = adapters.find((x) => x.value === v)!;
-    setForm((f) => ({ ...f, adapter_type: v, image_ref: a.image || f.image_ref }));
+    setForm((f) => ({
+      ...f,
+      adapter_type: v,
+      image_ref: a.image || f.image_ref,
+      slug: f.slug === "" || ["omniroute", "9router", "freellmapi", "litellm"].includes(f.slug) ? v : f.slug,
+      endpoint_path: f.endpoint_path === "" || ["/omniroute", "/9router", "/freellmapi", "/litellm", "/omniroute/v1", "/9router/v1", "/freellmapi/v1", "/litellm/v1"].includes(f.endpoint_path) ? `/${v}/v1` : f.endpoint_path,
+    }));
   }
 
   async function submit(e: React.FormEvent) {

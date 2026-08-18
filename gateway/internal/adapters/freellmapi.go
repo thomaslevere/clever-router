@@ -15,7 +15,7 @@ import (
 
 // FreeLLMAPIAdapter manages a FreeLLMAPI (ghcr.io/tashfeenahmed/freellmapi:latest) container.
 //
-// FreeLLMAPI is an open-source, self-hosted AI API gateway that aggregates free-tier AI endpoints
+// FreeLLMAPI is an open-source, self-hosted headless AI API gateway that aggregates free-tier AI endpoints
 // (HuggingFace, Groq, Cohere, Cloudflare, etc.) into a unified OpenAI-compatible /v1 surface.
 // Its internal service listens on port 3001 by default and persists session state, encryption keys,
 // and provider configurations in /app/server/data and /app/data.
@@ -35,7 +35,7 @@ func (FreeLLMAPIAdapter) HealthPath(r *store.Router) string {
 	if p := strConfig(r, "health_path"); p != "" {
 		return p
 	}
-	return "/"
+	return "/v1/models"
 }
 
 // ModelsPath is the OpenAI-compatible model listing endpoint.
@@ -46,11 +46,12 @@ func (FreeLLMAPIAdapter) ModelsPath(r *store.Router) string {
 	return "/v1/models"
 }
 
+// NativePanelPath returns "" because FreeLLMAPI is a pure headless API bridge without a web GUI.
 func (FreeLLMAPIAdapter) NativePanelPath(r *store.Router) string {
 	if p := strConfig(r, "native_panel_path"); p != "" {
 		return p
 	}
-	return "/"
+	return ""
 }
 
 func (FreeLLMAPIAdapter) DeclaredVolumes(r *store.Router) []string {
@@ -115,13 +116,14 @@ func (FreeLLMAPIAdapter) Env(r *store.Router, decrypted map[string]string) []str
 
 	envMap := make(map[string]string)
 
-	// 1. Baseline Defaults for FreeLLMAPI
+	// 1. Baseline Defaults for FreeLLMAPI with all host-binding and port variations
 	envMap["NODE_ENV"] = "production"
 	envMap["PORT"] = port
+	envMap["HOST"] = "0.0.0.0"
+	envMap["HOSTNAME"] = "0.0.0.0"
+	envMap["HOST_BIND"] = "0.0.0.0"
 	envMap["DATA_DIR"] = dataPath
 	envMap["HOME"] = dataPath
-	envMap["HOST_BIND"] = "0.0.0.0"
-	envMap["HOSTNAME"] = "0.0.0.0"
 
 	// Multi-core and concurrency optimization (Host has 12 vCPUs / 24 GB RAM shared)
 	envMap["UV_THREADPOOL_SIZE"] = "12"

@@ -432,6 +432,14 @@ func (a *API) createRouter(c *gin.Context) {
 	if endpointPath == "" {
 		endpointPath = "/" + req.Slug
 	}
+	if !strings.HasPrefix(endpointPath, "/") {
+		endpointPath = "/" + endpointPath
+	}
+	// Strip trailing /v1 to avoid double nesting like /freellmapi/v1/v1
+	endpointPath = strings.TrimSuffix(strings.TrimRight(endpointPath, "/"), "/v1")
+	if endpointPath == "" {
+		endpointPath = "/" + req.Slug
+	}
 
 	imageRef := req.ImageRef
 	if imageRef == "" {

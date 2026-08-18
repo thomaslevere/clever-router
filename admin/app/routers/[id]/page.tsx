@@ -332,8 +332,8 @@ export default function RouterDetailPage() {
         </div>
       )}
 
-      {/* Native Dashboard Credentials & Factory Reset Banner */}
-      {(r.adapter_type === "omniroute" || r.adapter_type === "9router" || r.adapter_type === "freellmapi") && (
+      {/* Native Dashboard Credentials & Factory Reset Banner for OmniRoute and 9Router */}
+      {(r.adapter_type === "omniroute" || r.adapter_type === "9router") && (
         <div className={`card p-4 shadow-sm border ${
           initialPassword
             ? "bg-amber-500/5 dark:bg-amber-500/10 border-amber-500/20"
@@ -378,16 +378,17 @@ export default function RouterDetailPage() {
                   className="btn-secondary text-xs flex items-center gap-1.5 py-1.5 px-3"
                 >
                   <span>{copiedPass ? "✓" : "📋"}</span>
-                  <span>{copiedPass ? "Copied!" : "Copy Password"}</span>
+                  <span>{copiedPass ? "Copied" : "Copy Password"}</span>
                 </button>
-              ) : (
+              ) : null}
+              {panelUrl && (
                 <a
-                  href={panelUrl || getRouterPanelUrl(r)}
+                  href={panelUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="btn-primary text-xs flex items-center gap-1.5 py-1.5 px-3 shadow-sm"
+                  className="btn-primary text-xs flex items-center gap-1.5 py-1.5 px-3"
                 >
-                  <span>Open Setup Wizard ↗</span>
+                  <span>Open Panel ↗</span>
                 </a>
               )}
 
@@ -400,6 +401,43 @@ export default function RouterDetailPage() {
               >
                 <span>{isWiping ? "🔄" : "🧹"}</span>
                 <span>{isWiping ? "Wiping..." : "Wipe & Fresh Reset"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Headless API Gateway Card for FreeLLMAPI */}
+      {r.adapter_type === "freellmapi" && (
+        <div className="card p-4 shadow-sm border bg-brand/5 dark:bg-brand/10 border-brand/20">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="grid h-9 w-9 place-items-center rounded-xl text-lg bg-brand/10 text-brand">
+                ⚡
+              </div>
+              <div>
+                <div className="text-xs font-bold uppercase tracking-wider text-brand">
+                  Headless OpenAI API Bridge Active
+                </div>
+                <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                  FreeLLMAPI is a headless aggregator (pure OpenAI-compatible REST backend without a web GUI). Point your AI chat apps and OpenAI SDKs directly to the Base URL.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const cleanPath = r.endpoint_path.endsWith("/v1") ? r.endpoint_path : `${r.endpoint_path}/v1`;
+                  const curlCmd = `curl ${typeof window !== "undefined" ? window.location.origin : ""}${cleanPath}/models`;
+                  navigator.clipboard.writeText(curlCmd);
+                  setCopiedBaseUrl(true);
+                  setTimeout(() => setCopiedBaseUrl(false), 2000);
+                }}
+                className="btn-secondary text-xs flex items-center gap-1.5 py-1.5 px-3 font-mono"
+              >
+                <span>📋</span>
+                <span>Copy Test curl</span>
               </button>
             </div>
           </div>

@@ -103,6 +103,32 @@ export default function EnvironmentVariablesCard({
     setTimeout(() => setStatusMsg(null), 3000);
   };
 
+  // Load baseline preset for 9Router
+  const load9RouterPreset = () => {
+    isDirty.current = true;
+    const preset: EnvVariable[] = [
+      { key: "DATA_DIR", value: "/app/data", is_secret: false },
+      { key: "PORT", value: "20128", is_secret: false },
+      { key: "NODE_ENV", value: "production", is_secret: false },
+      { key: "HOSTNAME", value: "0.0.0.0", is_secret: false },
+      { key: "UV_THREADPOOL_SIZE", value: "12", is_secret: false },
+      { key: "NODE_OPTIONS", value: "--max-old-space-size=4096", is_secret: false },
+      { key: "GOMAXPROCS", value: "12", is_secret: false },
+      { key: "WEB_CONCURRENCY", value: "auto", is_secret: false },
+    ];
+
+    const currentKeys = new Set(envs.map((e) => e.key.trim().toUpperCase()));
+    const merged = [...envs];
+    for (const p of preset) {
+      if (!currentKeys.has(p.key)) {
+        merged.push(p);
+      }
+    }
+    setEnvs(merged);
+    setStatusMsg({ type: "success", text: "9Router preset variables added to list." });
+    setTimeout(() => setStatusMsg(null), 3000);
+  };
+
   // Convert raw .env text to structured array
   const parseRawEnv = (text: string) => {
     isDirty.current = true;
@@ -240,6 +266,18 @@ export default function EnvironmentVariablesCard({
             </button>
           )}
 
+          {adapterType === "9router" && (
+            <button
+              type="button"
+              onClick={load9RouterPreset}
+              className="btn-ghost text-xs px-2.5 py-1.5 flex items-center gap-1.5 hover:border-emerald-500/40 text-emerald-600 dark:text-emerald-400"
+              title="Load high-performance 9Router multi-core presets"
+            >
+              <span>⚡</span>
+              <span>9Router Preset</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => {
@@ -297,6 +335,15 @@ export default function EnvironmentVariablesCard({
                   className="btn-primary text-xs px-3 py-1 font-semibold"
                 >
                   ⚡ Load OmniRoute Preset
+                </button>
+              )}
+              {adapterType === "9router" && (
+                <button
+                  type="button"
+                  onClick={load9RouterPreset}
+                  className="btn-primary text-xs px-3 py-1 font-semibold bg-emerald-600 hover:bg-emerald-500"
+                >
+                  ⚡ Load 9Router Preset
                 </button>
               )}
             </div>

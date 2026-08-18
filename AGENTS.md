@@ -61,7 +61,7 @@ export REDIS_URL="localhost:6379"
 export ENCRYPTION_KEY="$(openssl rand -hex 32)"
 export ADMIN_API_KEY="dev-admin-token"
 export APP_ENV=dev
-export ALLOWED_IMAGES="diegosouzapw/omniroute:latest"
+export ALLOWED_IMAGES="diegosouzapw/omniroute:latest,decolua/9router:latest,ghcr.io/decolua/9router:latest,9router/9router:latest"
 
 # 3. gateway (migrations run on boot)
 cd gateway && go run ./cmd/server

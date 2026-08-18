@@ -311,7 +311,7 @@ export default function RouterDetailPage() {
       </div>
 
       {/* Native Dashboard Credentials & Factory Reset Banner */}
-      {r.adapter_type === "omniroute" && (
+      {(r.adapter_type === "omniroute" || r.adapter_type === "9router") && (
         <div className={`card p-4 shadow-sm border ${
           initialPassword
             ? "bg-amber-500/5 dark:bg-amber-500/10 border-amber-500/20"

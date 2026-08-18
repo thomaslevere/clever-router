@@ -6,6 +6,7 @@ import type { Router } from "../lib/types";
 
 const adapters = [
   { value: "omniroute", label: "OmniRoute", image: "diegosouzapw/omniroute:latest" },
+  { value: "9router", label: "9Router", image: "decolua/9router:latest" },
   { value: "litellm", label: "LiteLLM", image: "ghcr.io/berriai/litellm:main-stable" },
   { value: "custom", label: "Custom Gateway", image: "" },
 ];
@@ -21,6 +22,7 @@ export default function AddRouterModal({
     slug: "",
     name: "",
     adapter_type: "omniroute",
+    endpoint_path: "",
     image_ref: adapters[0].image,
     desired_state: "stopped",
   });
@@ -165,6 +167,22 @@ export default function AddRouterModal({
               Must match the server allowlist (<code className="text-slate-400">ALLOWED_IMAGES</code>).
             </p>
           </div>
+
+          {form.adapter_type === "9router" && (
+            <div className="space-y-3 rounded-lg bg-emerald-500/5 dark:bg-emerald-500/10 p-3.5 border border-emerald-500/20">
+              <div className="flex items-center gap-2 font-semibold text-emerald-600 dark:text-emerald-400 text-xs">
+                <span>⚡</span>
+                <span>9Router High-Performance AI Gateway</span>
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                Optimized for high-throughput proxying with RTK token compression, 3-tier fallback routing (Subscription → Cheap → Free), and OpenAI-compatible endpoints.
+              </p>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
+                <span>Multi-core acceleration:</span>
+                <span className="font-mono text-emerald-600 dark:text-emerald-400 font-bold">12 vCPUs / 8 GB</span>
+              </div>
+            </div>
+          )}
 
           {form.adapter_type === "omniroute" && (
             <div className="space-y-3 rounded-lg bg-brand/5 dark:bg-brand/10 p-3.5 border border-brand/20">

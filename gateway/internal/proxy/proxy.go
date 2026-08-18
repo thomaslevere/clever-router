@@ -40,9 +40,11 @@ func New(t *router.Table, a *keys.Auth, st *store.Store, c *cache.Cache, cfg *co
 		client: &http.Client{
 			Timeout: 0, // streaming must not be cut by an overall timeout
 			Transport: &http.Transport{
-				DialContext:     (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-				MaxIdleConns:    100,
-				IdleConnTimeout: 90 * time.Second,
+				DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				MaxIdleConns:        2048,
+				MaxIdleConnsPerHost: 512,
+				MaxConnsPerHost:     1024,
+				IdleConnTimeout:     90 * time.Second,
 			},
 		},
 	}
@@ -186,7 +188,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 
 	// Automatic API Path Mapping:
 	// If upstream returned 404 Not Found, automatically map between
-	// /v1/* <-> /api/v1/* or /v1 <-> /api/v1/models
+	// /v1/* <-> /api/v1/*, /something/v1/* <-> /v1/*, and root variants
 	if resp.StatusCode == http.StatusNotFound {
 		var altPaths []string
 		if strings.HasPrefix(upstreamPath, "/v1/") {
@@ -197,6 +199,12 @@ func (p *Proxy) Handle(c *gin.Context) {
 			altPaths = append(altPaths, "/api/v1", "/v1/models", "/api/v1/models")
 		} else if upstreamPath == "/api/v1" || upstreamPath == "/api/v1/" {
 			altPaths = append(altPaths, "/v1", "/api/v1/models", "/v1/models")
+		} else if strings.HasSuffix(upstreamPath, "/v1/models") {
+			altPaths = append(altPaths, "/v1/models", "/api/v1/models")
+		} else if strings.HasSuffix(upstreamPath, "/models") {
+			altPaths = append(altPaths, "/v1/models", "/api/v1/models")
+		} else if !strings.HasPrefix(upstreamPath, "/v1/") {
+			altPaths = append(altPaths, "/v1"+upstreamPath, "/api/v1"+upstreamPath)
 		}
 
 		for _, altPath := range altPaths {

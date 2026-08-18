@@ -28,22 +28,8 @@ func NewSupervisor(m *adapters.Manager, st *store.Store, c *cache.Cache, t *rout
 // Boot reconciles desired state on startup. Each router is started in its own
 // goroutine so a slow image pull or unhealthy router doesn't block others.
 func (s *Supervisor) Boot(ctx context.Context) {
-	routers, err := s.store.ListRouters(ctx)
-	if err != nil {
-		log.Printf("[supervisor] list routers: %v", err)
-		return
-	}
-	for _, r := range routers {
-		if r.DesiredState == "running" {
-			go func(r store.Router) {
-				log.Printf("[supervisor] starting router %s (%s)", r.Slug, r.ImageRef)
-				if err := s.manager.Start(ctx, &r); err != nil {
-					log.Printf("[supervisor] failed to start %s: %v", r.Slug, err)
-				}
-			}(r)
-		} else {
-			s.table.Delete(r.Slug)
-		}
+	if err := s.manager.ReconcileAndStartAll(ctx); err != nil {
+		log.Printf("[supervisor] boot reconciliation error: %v", err)
 	}
 }
 

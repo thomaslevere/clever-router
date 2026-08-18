@@ -580,6 +580,60 @@ func (m *Manager) StopAll(ctx context.Context) {
 	}
 }
 
+// StopAllForShutdown gracefully terminates containers during server shutdown without changing desired state in DB.
+func (m *Manager) StopAllForShutdown(ctx context.Context) {
+	m.StopAll(ctx)
+}
+
+// ReconcileAndStartAll starts only routers where desired_state or desired_status is "running".
+func (m *Manager) ReconcileAndStartAll(ctx context.Context) error {
+	routers, err := m.store.ListRouters(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to fetch routers for reconciliation: %w", err)
+	}
+
+	startedCount := 0
+	for _, r := range routers {
+		if r.DesiredState == "running" || r.DesiredStatus == "running" {
+			log.Printf("[reconcile] auto-starting router %s (%s) based on desired state", r.Slug, r.ImageRef)
+			go func(router store.Router) {
+				bootCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				if err := m.Start(bootCtx, &router); err != nil {
+					log.Printf("[reconcile] failed to start %s: %v", router.Slug, err)
+				}
+			}(r)
+			startedCount++
+		} else {
+			log.Printf("[reconcile] skipping stopped router %s (desired state: %s)", r.Slug, r.DesiredState)
+		}
+	}
+	log.Printf("[reconcile] boot reconciliation complete: %d/%d routers queued to start", startedCount, len(routers))
+	return nil
+}
+
+func (m *Manager) StartRouterExplicit(ctx context.Context, id string) error {
+	r, err := m.store.GetRouter(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := m.store.SetDesiredState(ctx, id, "running"); err != nil {
+		return err
+	}
+	return m.Start(ctx, r)
+}
+
+func (m *Manager) StopRouterExplicit(ctx context.Context, id string) error {
+	r, err := m.store.GetRouter(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := m.store.SetDesiredState(ctx, id, "stopped"); err != nil {
+		return err
+	}
+	return m.Stop(ctx, r)
+}
+
 func (m *Manager) Restart(ctx context.Context, r *store.Router) error {
 	val, _ := m.routerLocks.LoadOrStore(r.ID, &sync.Mutex{})
 	mu := val.(*sync.Mutex)

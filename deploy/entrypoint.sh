@@ -70,7 +70,14 @@ if [ $i -eq $MAX_WAIT ]; then
     echo "[Entrypoint] warning: Next.js did not respond in ${MAX_WAIT}s — continuing anyway"
 fi
 
-# 6. Start Go Gateway Engine in background and capture PID
+# 6. Verify Docker socket presence
+if [ -S "/var/run/docker.sock" ]; then
+    echo "[Entrypoint] Docker socket verified at /var/run/docker.sock"
+else
+    echo "[Entrypoint] Notice: /var/run/docker.sock is not currently mounted (set CC_MOUNT_DOCKER_SOCKET=true in Clever Cloud)"
+fi
+
+# 7. Start Go Gateway Engine in background and capture PID
 echo "[Entrypoint] Launching Gateway engine..."
 /app/gateway &
 GATEWAY_PID=$!

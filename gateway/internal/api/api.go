@@ -707,13 +707,19 @@ func (a *API) startRouter(c *gin.Context) {
 		return
 	}
 	_ = a.store.SetDesiredState(c, r.ID, "running")
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	go func(target store.Router) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("[api] panic starting %s: %v", target.Slug, rec)
+				_ = a.store.UpdateRouterState(context.Background(), target.ID, "failed", "", "", "", "unhealthy")
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cancel()
-		if err := a.manager.Start(ctx, r); err != nil {
-			log.Printf("[api] start %s: %v", r.Slug, err)
+		if err := a.manager.Start(ctx, &target); err != nil {
+			log.Printf("[api] start %s: %v", target.Slug, err)
 		}
-	}()
+	}(*r)
 	a.audit(c, "router.start", "router", r.ID, nil, nil)
 	c.JSON(202, gin.H{"ok": true, "state": "starting"})
 }

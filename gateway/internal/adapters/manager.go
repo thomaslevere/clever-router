@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -223,7 +224,24 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	return m.startLocked(ctx, r, true)
+	err := m.startLocked(ctx, r, true)
+	if err != nil {
+		log.Printf("[manager] start error for %s: %v", r.Slug, err)
+		_ = m.store.UpdateRouterState(context.Background(), r.ID, "failed", "", "", "", "unhealthy")
+		m.emitEvent(r.ID, "state_changed", map[string]any{
+			"status":        "failed",
+			"runtime_state": "failed",
+			"health_status": "unhealthy",
+			"desired_state": "running",
+			"slug":          r.Slug,
+			"error":         err.Error(),
+		})
+		logger.Error("router", r.Slug, fmt.Sprintf("Failed to start router: %v", err), store.Map{
+			"slug":  r.Slug,
+			"error": err.Error(),
+		})
+	}
+	return err
 }
 
 func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExisting bool) error {
@@ -775,12 +793,45 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 // ----- internals -----
 
 func (m *Manager) ensureImage(ctx context.Context, ref string) error {
+	// 1. Fast path: check if image is already present in the local Docker daemon
+	if _, _, err := m.docker.ImageInspectWithRaw(ctx, ref); err == nil {
+		log.Printf("[manager] image %s already cached locally; skipping pull", ref)
+		return nil
+	}
+
+	log.Printf("[manager] pulling image %s from registry...", ref)
 	reader, err := m.docker.ImagePull(ctx, ref, image.PullOptions{})
 	if err != nil {
-		return err
+		return fmt.Errorf("pull error: %w", err)
 	}
-	_, _ = io.Copy(io.Discard, reader)
-	return reader.Close()
+	defer reader.Close()
+
+	// Stream pull progress and capture any registry errors
+	dec := json.NewDecoder(reader)
+	var pullMsg struct {
+		Status      string `json:"status"`
+		Progress    string `json:"progress"`
+		ID          string `json:"id"`
+		Error       string `json:"error"`
+		ErrorDetail struct {
+			Message string `json:"message"`
+		} `json:"errorDetail"`
+	}
+
+	for dec.More() {
+		if err := dec.Decode(&pullMsg); err != nil {
+			break
+		}
+		if pullMsg.Error != "" {
+			return fmt.Errorf("docker pull failed: %s", pullMsg.Error)
+		}
+		if pullMsg.ErrorDetail.Message != "" {
+			return fmt.Errorf("docker pull failed: %s", pullMsg.ErrorDetail.Message)
+		}
+	}
+
+	log.Printf("[manager] successfully pulled image %s", ref)
+	return nil
 }
 
 // BUG-5 FIX: stopAndRemove operates on a *local* copy of the router so it

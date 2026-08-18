@@ -213,6 +213,19 @@ func (b *FastVolumeBridge) HydrateFromS3(ctx context.Context, s3Key, targetDir s
 			continue
 		}
 
+		// Skip stale lockfiles and sockets that crash SQLite / Node / PM2 on boot
+		baseName := filepath.Base(cleaned)
+		if strings.HasSuffix(baseName, ".pid") ||
+			strings.HasSuffix(baseName, ".lock") ||
+			strings.HasSuffix(baseName, ".sock") ||
+			strings.HasSuffix(baseName, ".sock.lock") ||
+			baseName == "pm2.pid" ||
+			baseName == "server.pid" ||
+			strings.HasSuffix(baseName, ".db-shm") ||
+			strings.HasSuffix(baseName, ".db-wal") {
+			continue
+		}
+
 		targetPath := filepath.Join(targetDir, cleaned)
 		if header.Typeflag == tar.TypeDir {
 			if err := os.MkdirAll(targetPath, 0777); err != nil {
@@ -400,6 +413,25 @@ func (b *FastVolumeBridge) HydrateContainerCandidateKeys(ctx context.Context, cl
 					return
 				}
 
+				// Security: prevent Zip-Slip / path traversal vulnerability
+				cleaned := filepath.Clean(header.Name)
+				if strings.HasPrefix(cleaned, "..") || filepath.IsAbs(cleaned) {
+					continue
+				}
+
+				// Skip stale lockfiles and sockets that crash SQLite / Node / PM2 on boot
+				baseName := filepath.Base(cleaned)
+				if strings.HasSuffix(baseName, ".pid") ||
+					strings.HasSuffix(baseName, ".lock") ||
+					strings.HasSuffix(baseName, ".sock") ||
+					strings.HasSuffix(baseName, ".sock.lock") ||
+					baseName == "pm2.pid" ||
+					baseName == "server.pid" ||
+					strings.HasSuffix(baseName, ".db-shm") ||
+					strings.HasSuffix(baseName, ".db-wal") {
+					continue
+				}
+
 				// Normalize UID and GID to 0 (root) so Docker userns remap never rejects the archive
 				header.Uid = 0
 				header.Gid = 0
@@ -470,6 +502,18 @@ func (b *FastVolumeBridge) SnapshotContainer(ctx context.Context, cli *client.Cl
 		}
 		if err != nil {
 			break
+		}
+
+		// Skip stale lockfiles and sockets during snapshot creation
+		baseName := filepath.Base(header.Name)
+		if strings.HasSuffix(baseName, ".pid") ||
+			strings.HasSuffix(baseName, ".lock") ||
+			strings.HasSuffix(baseName, ".sock") ||
+			baseName == "pm2.pid" ||
+			baseName == "server.pid" ||
+			strings.HasSuffix(baseName, ".db-shm") ||
+			strings.HasSuffix(baseName, ".db-wal") {
+			continue
 		}
 
 		// Normalize UID/GID for portability across all Docker hosts and userns configurations

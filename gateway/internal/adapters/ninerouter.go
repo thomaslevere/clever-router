@@ -86,7 +86,10 @@ func (NineRouterAdapter) Env(r *store.Router, decrypted map[string]string) []str
 	envMap["PORT"] = port
 	envMap["DATA_DIR"] = dataPath
 	envMap["HOME"] = dataPath
+	envMap["HOST"] = "0.0.0.0"
 	envMap["HOSTNAME"] = "0.0.0.0"
+	envMap["HOST_BIND"] = "0.0.0.0"
+	envMap["BIND"] = "0.0.0.0"
 	envMap["BASE_PATH"] = "/" + r.Slug
 	envMap["PREFIX"] = "/" + r.Slug
 	envMap["PUBLIC_URL"] = "/" + r.Slug

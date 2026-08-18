@@ -171,8 +171,12 @@ func (a *API) Register(r *gin.Engine) {
 	a.registerAdmin(rest.Group("/"))
 	a.rest = rest
 
-	// Namespaced AI proxy: /{slug}/v1/... and /{slug}/{native}/...
+	// Namespaced AI proxy & App UI proxy:
+	// /app/:slug/*path -> Web UI and dashboard of the router container (e.g. /app/omniroute/dashboard)
+	// /:slug/*path     -> OpenAI-compatible API routes (e.g. /omniroute/v1/chat/completions) & fallback UI
 	p := proxy.New(a.table, keys.NewAuth(a.store, a.cache), a.store, a.cache, a.cfg)
+	r.Any("/app/:slug", p.HandleApp)
+	r.Any("/app/:slug/*path", p.HandleApp)
 	r.Any("/:slug", p.Handle)
 	r.Any("/:slug/*path", p.Handle)
 	r.NoRoute(p.Handle)

@@ -65,7 +65,18 @@ type proxyError struct {
 	Error  string `json:"error"`
 }
 
+// HandleApp serves the web UI and dashboard of the container mounted under /app/:slug/*path
+func (p *Proxy) HandleApp(c *gin.Context) {
+	p.handleRequest(c, true)
+}
+
+// Handle serves OpenAI-compatible APIs and fallback routes under /:slug/*path
 func (p *Proxy) Handle(c *gin.Context) {
+	isApp := strings.HasPrefix(c.Request.URL.Path, "/app/") || c.Request.URL.Path == "/app"
+	p.handleRequest(c, isApp)
+}
+
+func (p *Proxy) handleRequest(c *gin.Context, isApp bool) {
 	slug := c.Param("slug")
 	path := c.Param("path")
 
@@ -91,11 +102,24 @@ func (p *Proxy) Handle(c *gin.Context) {
 
 	token := p.extractToken(c)
 
-	// Trailing slash normalization for SPA root:
-	// A request to /9router must redirect to /9router/ so browsers resolve relative assets (e.g. ./assets/app.js) correctly
+	prefix := "/" + targetSlug
+	if isApp {
+		prefix = "/app/" + targetSlug
+	}
+
+	// Trailing slash normalization & dashboard landing for UI root
 	if (path == "" || path == "/") && targetSlug == slug && c.Request.Method == "GET" {
+		if isApp {
+			redirectURL := prefix + "/dashboard"
+			if token != "" {
+				redirectURL += "?token=" + url.QueryEscape(token)
+			}
+			c.Redirect(http.StatusTemporaryRedirect, redirectURL)
+			return
+		}
+
 		if !strings.HasSuffix(c.Request.URL.Path, "/") {
-			redirectURL := "/" + targetSlug + "/"
+			redirectURL := prefix + "/"
 			if c.Request.URL.RawQuery != "" {
 				redirectURL += "?" + c.Request.URL.RawQuery
 			}
@@ -196,7 +220,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 	req.Host = ""
 
 	// Inject Reverse Proxy Namespace Headers so downstream instances know their public mount point
-	req.Header.Set("X-Forwarded-Prefix", "/"+targetSlug)
+	req.Header.Set("X-Forwarded-Prefix", prefix)
 	if proto := c.GetHeader("X-Forwarded-Proto"); proto != "" {
 		req.Header.Set("X-Forwarded-Proto", proto)
 	} else if c.Request.TLS != nil {
@@ -247,7 +271,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 				continue
 			}
 			copyHeaders(altReq.Header, c.Request.Header)
-			altReq.Header.Set("X-Forwarded-Prefix", "/"+targetSlug)
+			altReq.Header.Set("X-Forwarded-Prefix", prefix)
 			altReq.Host = ""
 			if altResp, err := p.client.Do(altReq); err == nil {
 				if altResp.StatusCode != http.StatusNotFound {
@@ -269,7 +293,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 		// Location header rewriting for 30x redirects
 		if strings.EqualFold(k, "Location") {
 			for _, v := range vs {
-				rewrittenLoc := p.rewriteLocation(v, targetSlug)
+				rewrittenLoc := p.rewriteLocation(v, prefix)
 				c.Writer.Header().Add(k, rewrittenLoc)
 			}
 			continue
@@ -291,7 +315,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 	if strings.Contains(contentType, "text/html") {
 		rawHTML, err := io.ReadAll(resp.Body)
 		if err == nil {
-			modifiedHTML := p.transformHTML(rawHTML, targetSlug)
+			modifiedHTML := p.transformHTML(rawHTML, prefix, targetSlug)
 			c.Writer.Header().Set("Content-Length", strconv.Itoa(len(modifiedHTML)))
 			c.Writer.WriteHeader(resp.StatusCode)
 			_, _ = c.Writer.Write(modifiedHTML)
@@ -338,12 +362,11 @@ func (p *Proxy) Handle(c *gin.Context) {
 	}
 }
 
-// rewriteLocation prepends the router prefix to relative and internal absolute redirects
-func (p *Proxy) rewriteLocation(loc, slug string) string {
-	if loc == "" || slug == "" {
+// rewriteLocation prepends the router prefix (e.g. /app/omniroute or /omniroute) to relative and internal absolute redirects
+func (p *Proxy) rewriteLocation(loc, prefix string) string {
+	if loc == "" || prefix == "" {
 		return loc
 	}
-	prefix := "/" + slug
 
 	// 1. Root-relative redirect (e.g. /dashboard or /login or /setup)
 	if strings.HasPrefix(loc, "/") {
@@ -369,11 +392,10 @@ func (p *Proxy) rewriteLocation(loc, slug string) string {
 }
 
 // transformHTML patches Next.js client routing metadata, rewrites absolute asset URLs, and injects <base> guard
-func (p *Proxy) transformHTML(raw []byte, slug string) []byte {
-	if len(raw) == 0 || slug == "" {
+func (p *Proxy) transformHTML(raw []byte, prefix, slug string) []byte {
+	if len(raw) == 0 || prefix == "" {
 		return raw
 	}
-	prefix := "/" + slug
 	htmlStr := string(raw)
 
 	// 1. Rewrite Next.js __NEXT_DATA__ JSON configuration to align client-side router
@@ -386,7 +408,7 @@ func (p *Proxy) transformHTML(raw []byte, slug string) []byte {
 		htmlStr = strings.ReplaceAll(htmlStr, `"assetPrefix":null`, fmt.Sprintf(`"assetPrefix":"%s"`, prefix))
 	}
 
-	// 2. Rewrite root asset attributes in HTML so bundles and styles load under the subpath
+	// 2. Rewrite root asset attributes in HTML so bundles and styles load under the subpath prefix
 	htmlStr = strings.ReplaceAll(htmlStr, `src="/_next/`, fmt.Sprintf(`src="%s/_next/`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `href="/_next/`, fmt.Sprintf(`href="%s/_next/`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `src="/static/`, fmt.Sprintf(`src="%s/static/`, prefix))
@@ -455,7 +477,8 @@ func (p *Proxy) findFallbackRouter(c *gin.Context) (string, string) {
 	if referer != "" {
 		snap := p.table.Snapshot()
 		for s, t := range snap {
-			if strings.Contains(referer, "/"+s+"/") || strings.Contains(referer, "/"+s+"?") || strings.HasSuffix(referer, "/"+s) {
+			if strings.Contains(referer, "/app/"+s+"/") || strings.Contains(referer, "/app/"+s+"?") || strings.HasSuffix(referer, "/app/"+s) ||
+				strings.Contains(referer, "/"+s+"/") || strings.Contains(referer, "/"+s+"?") || strings.HasSuffix(referer, "/"+s) {
 				return s, t
 			}
 		}

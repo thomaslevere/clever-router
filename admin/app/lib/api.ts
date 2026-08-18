@@ -118,6 +118,7 @@ export const api = {
 export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: string; native_panel_url?: string }): string {
   if (typeof window === "undefined") return "";
   const token = getToken();
+  const slug = router.slug || (router.endpoint_path ? router.endpoint_path.replace(/^\//, "") : "");
   let path = router.native_panel_url || "";
 
   if (path.startsWith("http://") || path.startsWith("https://")) {
@@ -125,15 +126,18 @@ export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: strin
       const u = new URL(path);
       path = u.pathname;
     } catch {
-      path = "/dashboard";
+      path = `/app/${slug}/dashboard`;
     }
   }
 
-  const endpoint = router.endpoint_path || `/${router.slug || ""}`;
   if (!path || path === "/" || path === "/dashboard") {
-    path = `${endpoint}/dashboard`;
-  } else if (!path.startsWith(endpoint)) {
-    path = `${endpoint}${path.startsWith("/") ? path : `/${path}`}`;
+    path = `/app/${slug}/dashboard`;
+  } else if (!path.startsWith(`/app/${slug}`)) {
+    if (path.startsWith(`/${slug}`)) {
+      path = `/app${path}`;
+    } else {
+      path = `/app/${slug}${path.startsWith("/") ? path : `/${path}`}`;
+    }
   }
 
   const base = window.location.origin;

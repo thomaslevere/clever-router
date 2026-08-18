@@ -124,10 +124,10 @@ func (FreeLLMAPIAdapter) Env(r *store.Router, decrypted map[string]string) []str
 	envMap["HOST_BIND"] = "0.0.0.0"
 	envMap["DATA_DIR"] = dataPath
 	envMap["HOME"] = dataPath
-	envMap["BASE_PATH"] = "/" + r.Slug
-	envMap["PUBLIC_PATH"] = "/" + r.Slug
-	envMap["BASE_URL"] = "/" + r.Slug
-	envMap["PREFIX"] = "/" + r.Slug
+	envMap["BASE_PATH"] = "/app/" + r.Slug
+	envMap["PUBLIC_PATH"] = "/app/" + r.Slug
+	envMap["BASE_URL"] = "/app/" + r.Slug
+	envMap["PREFIX"] = "/app/" + r.Slug
 
 	// Multi-core and concurrency optimization (Host has 12 vCPUs / 24 GB RAM shared)
 	envMap["UV_THREADPOOL_SIZE"] = "12"

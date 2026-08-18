@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +40,10 @@ func New(t *router.Table, a *keys.Auth, st *store.Store, c *cache.Cache, cfg *co
 		table: t, auth: a, store: st, cache: c, cfg: cfg,
 		client: &http.Client{
 			Timeout: 0, // streaming must not be cut by an overall timeout
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				// Prevent http.Client from automatically following redirects so we can rewrite Location headers to the browser
+				return http.ErrUseLastResponse
+			},
 			Transport: &http.Transport{
 				DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 				MaxIdleConns:        2048,
@@ -68,7 +73,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 	targetSlug := slug
 	upstreamPath := path
 
-	// Fallback routing for root-relative assets and sub-requests (e.g. /_next/*, /api/*, /favicon.ico)
+	// Fallback routing for root-relative assets and sub-requests (e.g. /_next/*, /assets/*, /static/*, /api/*, /favicon.ico)
 	if !ok {
 		fallbackSlug, fallbackTarget := p.findFallbackRouter(c)
 		if fallbackTarget != "" {
@@ -86,14 +91,17 @@ func (p *Proxy) Handle(c *gin.Context) {
 
 	token := p.extractToken(c)
 
-	// If root of the router is accessed without subpath (e.g. /omniroute-live or /omniroute-live/)
-	if (path == "" || path == "/") && targetSlug == slug {
-		redirectURL := "/" + targetSlug + "/dashboard"
-		if token != "" {
-			redirectURL += "?token=" + url.QueryEscape(token)
+	// Trailing slash normalization for SPA root:
+	// A request to /9router must redirect to /9router/ so browsers resolve relative assets (e.g. ./assets/app.js) correctly
+	if (path == "" || path == "/") && targetSlug == slug && c.Request.Method == "GET" {
+		if !strings.HasSuffix(c.Request.URL.Path, "/") {
+			redirectURL := "/" + targetSlug + "/"
+			if c.Request.URL.RawQuery != "" {
+				redirectURL += "?" + c.Request.URL.RawQuery
+			}
+			c.Redirect(http.StatusMovedPermanently, redirectURL)
+			return
 		}
-		c.Redirect(http.StatusTemporaryRedirect, redirectURL)
-		return
 	}
 
 	isAdmin := false
@@ -144,9 +152,11 @@ func (p *Proxy) Handle(c *gin.Context) {
 		// preserved in the request and proxied directly to the upstream container.
 	}
 
-	// Set browser session cookies on valid token for subsequent Next.js asset/chunk requests
+	// Set browser session cookies on valid token for subsequent asset/chunk requests
 	if token != "" {
 		c.SetCookie("cr_router_auth", token, 86400*7, "/", "", false, false)
+	}
+	if targetSlug != "" {
 		c.SetCookie("cr_active_router", targetSlug, 86400*7, "/", "", false, false)
 	}
 
@@ -168,6 +178,11 @@ func (p *Proxy) Handle(c *gin.Context) {
 		}
 	}
 
+	// Ensure upstreamPath has leading slash
+	if !strings.HasPrefix(upstreamPath, "/") {
+		upstreamPath = "/" + upstreamPath
+	}
+
 	upURL := strings.TrimRight(target, "/") + upstreamPath
 	if c.Request.URL.RawQuery != "" {
 		upURL += "?" + c.Request.URL.RawQuery
@@ -180,6 +195,23 @@ func (p *Proxy) Handle(c *gin.Context) {
 	copyHeaders(req.Header, c.Request.Header)
 	req.Host = ""
 
+	// Inject Reverse Proxy Namespace Headers so downstream instances know their public mount point
+	req.Header.Set("X-Forwarded-Prefix", "/"+targetSlug)
+	if proto := c.GetHeader("X-Forwarded-Proto"); proto != "" {
+		req.Header.Set("X-Forwarded-Proto", proto)
+	} else if c.Request.TLS != nil {
+		req.Header.Set("X-Forwarded-Proto", "https")
+	} else {
+		req.Header.Set("X-Forwarded-Proto", "http")
+	}
+	if host := c.Request.Host; host != "" {
+		req.Header.Set("X-Forwarded-Host", host)
+	}
+	if clientIP := c.ClientIP(); clientIP != "" {
+		req.Header.Set("X-Forwarded-For", clientIP)
+	}
+	req.Header.Set("X-Original-URI", c.Request.RequestURI)
+
 	resp, err := p.client.Do(req)
 	if err != nil {
 		fail(c, http.StatusBadGateway, "upstream unreachable: %v", err)
@@ -189,7 +221,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 	// Automatic API Path Mapping:
 	// If upstream returned 404 Not Found, automatically map between
 	// /v1/* <-> /api/v1/*, /something/v1/* <-> /v1/*, and root variants
-	if resp.StatusCode == http.StatusNotFound {
+	if resp.StatusCode == http.StatusNotFound && (strings.Contains(upstreamPath, "/v1") || strings.Contains(upstreamPath, "/api")) {
 		var altPaths []string
 		if strings.HasPrefix(upstreamPath, "/v1/") {
 			altPaths = append(altPaths, "/api"+upstreamPath)
@@ -203,8 +235,6 @@ func (p *Proxy) Handle(c *gin.Context) {
 			altPaths = append(altPaths, "/v1/models", "/api/v1/models")
 		} else if strings.HasSuffix(upstreamPath, "/models") {
 			altPaths = append(altPaths, "/v1/models", "/api/v1/models")
-		} else if !strings.HasPrefix(upstreamPath, "/v1/") {
-			altPaths = append(altPaths, "/v1"+upstreamPath, "/api/v1"+upstreamPath)
 		}
 
 		for _, altPath := range altPaths {
@@ -217,6 +247,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 				continue
 			}
 			copyHeaders(altReq.Header, c.Request.Header)
+			altReq.Header.Set("X-Forwarded-Prefix", "/"+targetSlug)
 			altReq.Host = ""
 			if altResp, err := p.client.Do(altReq); err == nil {
 				if altResp.StatusCode != http.StatusNotFound {
@@ -230,9 +261,17 @@ func (p *Proxy) Handle(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	// Flush upstream headers to client.
+	// Flush and rewrite upstream headers to client.
 	for k, vs := range resp.Header {
 		if isHop(k) {
+			continue
+		}
+		// Location header rewriting for 30x redirects
+		if strings.EqualFold(k, "Location") {
+			for _, v := range vs {
+				rewrittenLoc := p.rewriteLocation(v, targetSlug)
+				c.Writer.Header().Add(k, rewrittenLoc)
+			}
 			continue
 		}
 		for _, v := range vs {
@@ -243,12 +282,29 @@ func (p *Proxy) Handle(c *gin.Context) {
 	if model != "" {
 		c.Writer.Header().Set("X-CleverRoute-Model", model)
 	}
-	c.Writer.WriteHeader(resp.StatusCode)
 
 	sc := newUsageScanner(model)
 	flusher, _ := c.Writer.(http.Flusher)
 
-	if isStream && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "event-stream") {
+	// HTML Content: Inject <base href="/<slug>/" /> tag to ensure relative assets and SPA routing resolve within the subpath
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(contentType, "text/html") {
+		rawHTML, err := io.ReadAll(resp.Body)
+		if err == nil {
+			modifiedHTML := p.injectHTMLBase(rawHTML, targetSlug)
+			c.Writer.Header().Set("Content-Length", strconv.Itoa(len(modifiedHTML)))
+			c.Writer.WriteHeader(resp.StatusCode)
+			_, _ = c.Writer.Write(modifiedHTML)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
+	}
+
+	c.Writer.WriteHeader(resp.StatusCode)
+
+	if isStream && strings.Contains(contentType, "event-stream") {
 		// Streaming SSE: tee through the sniffer while copying to the client.
 		tee := io.TeeReader(resp.Body, sc)
 		buf := make([]byte, 16*1024)
@@ -280,6 +336,71 @@ func (p *Proxy) Handle(c *gin.Context) {
 		// Record usage asynchronously so the client is never blocked on the DB.
 		go p.recordUsage(ki.ID, targetSlug, model, resp.StatusCode, sc)
 	}
+}
+
+// rewriteLocation prepends the router prefix to relative and internal absolute redirects
+func (p *Proxy) rewriteLocation(loc, slug string) string {
+	if loc == "" || slug == "" {
+		return loc
+	}
+	prefix := "/" + slug
+
+	// 1. Root-relative redirect (e.g. /dashboard or /login or /setup)
+	if strings.HasPrefix(loc, "/") {
+		if strings.HasPrefix(loc, prefix+"/") || loc == prefix {
+			return loc
+		}
+		return prefix + loc
+	}
+
+	// 2. Internal absolute redirect (e.g. http://172.17.0.x:3001/dashboard or http://127.0.0.1:3001/dashboard)
+	if u, err := url.Parse(loc); err == nil && u.Path != "" {
+		if strings.HasPrefix(u.Path, prefix+"/") || u.Path == prefix {
+			return u.Path
+		}
+		newPath := prefix + u.Path
+		if u.RawQuery != "" {
+			newPath += "?" + u.RawQuery
+		}
+		return newPath
+	}
+
+	return loc
+}
+
+// injectHTMLBase inserts <base href="/<slug>/" /> right after <head>
+func (p *Proxy) injectHTMLBase(raw []byte, slug string) []byte {
+	if bytes.Contains(bytes.ToLower(raw), []byte("<base ")) {
+		return raw
+	}
+	baseTag := []byte(fmt.Sprintf(`<base href="/%s/" />`, slug))
+
+	// Find <head> or <HEAD>
+	idx := bytes.Index(bytes.ToLower(raw), []byte("<head>"))
+	if idx != -1 {
+		pos := idx + len("<head>")
+		var buf bytes.Buffer
+		buf.Write(raw[:pos])
+		buf.Write(baseTag)
+		buf.Write(raw[pos:])
+		return buf.Bytes()
+	}
+
+	// Find <head ...>
+	idx = bytes.Index(bytes.ToLower(raw), []byte("<head"))
+	if idx != -1 {
+		endIdx := bytes.IndexByte(raw[idx:], '>')
+		if endIdx != -1 {
+			pos := idx + endIdx + 1
+			var buf bytes.Buffer
+			buf.Write(raw[:pos])
+			buf.Write(baseTag)
+			buf.Write(raw[pos:])
+			return buf.Bytes()
+		}
+	}
+
+	return raw
 }
 
 func (p *Proxy) findFallbackRouter(c *gin.Context) (string, string) {
@@ -451,84 +572,57 @@ type usageScanner struct {
 }
 
 func newUsageScanner(model string) *usageScanner {
-	return &usageScanner{model: model}
+	return &usageScanner{model: model, buf: make([]byte, 0, 4096)}
 }
 
 func (s *usageScanner) Write(p []byte) (int, error) {
-	s.buf = append(s.buf, p...)
-	// Keep only the last 64KB to bound memory usage.
-	const maxBuf = 64 * 1024
-	if len(s.buf) > maxBuf {
-		s.buf = s.buf[len(s.buf)-maxBuf:]
+	if s.done {
+		return len(p), nil
 	}
-	if !s.done && bytes.Contains(s.buf, []byte("[DONE]")) {
-		s.done = true
+	// Buffer up to 64KB for usage parsing.
+	if len(s.buf) < 65536 {
+		s.buf = append(s.buf, p...)
 	}
 	return len(p), nil
 }
 
 func (s *usageScanner) usage() (prompt, completion, total int) {
-	s.parse()
+	if !s.parsed {
+		s.parse()
+	}
 	return s.prompt, s.comp, s.total
 }
 
 func (s *usageScanner) parse() {
-	if s.parsed {
-		return
-	}
 	s.parsed = true
-	obj := extractJSONObject(s.buf, []byte(`"usage":`))
-	if obj == nil {
+	body := s.buf
+	// Try OpenAI format first: {"usage":{"prompt_tokens":...,"completion_tokens":...,"total_tokens":...}}
+	var oai struct {
+		Model string `json:"model"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &oai); err == nil && oai.Usage.TotalTokens > 0 {
+		s.prompt = oai.Usage.PromptTokens
+		s.comp = oai.Usage.CompletionTokens
+		s.total = oai.Usage.TotalTokens
 		return
 	}
-	var u struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+	// Anthropic format: {"usage":{"input_tokens":...,"output_tokens":...}}
+	var ant struct {
+		Model string `json:"model"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 	}
-	if err := json.Unmarshal(obj, &u); err == nil {
-		s.prompt, s.comp, s.total = u.PromptTokens, u.CompletionTokens, u.TotalTokens
+	if err := json.Unmarshal(body, &ant); err == nil && (ant.Usage.InputTokens > 0 || ant.Usage.OutputTokens > 0) {
+		s.prompt = ant.Usage.InputTokens
+		s.comp = ant.Usage.OutputTokens
+		s.total = ant.Usage.InputTokens + ant.Usage.OutputTokens
+		return
 	}
-}
-
-// extractJSONObject locates the JSON object immediately following marker in buf.
-func extractJSONObject(buf, marker []byte) []byte {
-	idx := bytes.Index(buf, marker)
-	if idx < 0 {
-		return nil
-	}
-	rest := buf[idx+len(marker):]
-	start := bytes.IndexByte(rest, '{')
-	if start < 0 {
-		return nil
-	}
-	start += idx + len(marker)
-
-	depth := 0
-	inStr := false
-	escape := false
-
-	for i := start; i < len(buf); i++ {
-		b := buf[i]
-		switch {
-		case escape:
-			escape = false
-		case inStr:
-			if b == '\\' {
-				escape = true
-			} else if b == '"' {
-				inStr = false
-			}
-		case b == '"':
-			inStr = true
-		case b == '{':
-			depth++
-		case b == '}':
-			depth--
-			if depth == 0 {
-				return buf[start : i+1]
-			}
-		}
-	}
-	return nil
 }

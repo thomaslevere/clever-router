@@ -93,6 +93,10 @@ func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []stri
 	envMap["NODE_ENV"] = "production"
 	envMap["PORT"] = port
 	envMap["DATA_DIR"] = dataPath
+	envMap["BASE_PATH"] = "/" + r.Slug
+	envMap["PUBLIC_URL"] = "/" + r.Slug
+	envMap["PREFIX"] = "/" + r.Slug
+	envMap["BASE_URL"] = "/" + r.Slug
 
 	// 2. Legacy router config["env"] (map) if present
 	if cfgEnv, ok := r.Config["env"].(map[string]any); ok {

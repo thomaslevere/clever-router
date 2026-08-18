@@ -175,6 +175,7 @@ func (a *API) Register(r *gin.Engine) {
 	p := proxy.New(a.table, keys.NewAuth(a.store, a.cache), a.store, a.cache, a.cfg)
 	r.Any("/:slug", p.Handle)
 	r.Any("/:slug/*path", p.Handle)
+	r.NoRoute(p.Handle)
 }
 
 // adminRoot routes /admin/api/* to the private REST engine and everything else

@@ -7,7 +7,7 @@ import type { Router } from "../lib/types";
 const adapters = [
   { value: "omniroute", label: "OmniRoute", image: "diegosouzapw/omniroute:latest" },
   { value: "9router", label: "9Router", image: "decolua/9router:latest" },
-  { value: "freellmapi", label: "FreeLLMAPI", image: "tashfeenahmed/freellmapi:latest" },
+  { value: "freellmapi", label: "FreeLLMAPI", image: "ghcr.io/tashfeenahmed/freellmapi:latest" },
   { value: "litellm", label: "LiteLLM", image: "ghcr.io/berriai/litellm:main-stable" },
   { value: "custom", label: "Custom Gateway", image: "" },
 ];

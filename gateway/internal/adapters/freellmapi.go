@@ -13,12 +13,12 @@ import (
 	"github.com/clever-route/gateway/internal/store"
 )
 
-// FreeLLMAPIAdapter manages a FreeLLMAPI (e.g. tashfeenahmed/freellmapi:latest) container.
+// FreeLLMAPIAdapter manages a FreeLLMAPI (ghcr.io/tashfeenahmed/freellmapi:latest) container.
 //
 // FreeLLMAPI is an open-source, self-hosted AI API gateway that aggregates free-tier AI endpoints
 // (HuggingFace, Groq, Cohere, Cloudflare, etc.) into a unified OpenAI-compatible /v1 surface.
 // Its internal service listens on port 3001 by default and persists session state, encryption keys,
-// and provider configurations in /app/data.
+// and provider configurations in /app/server/data and /app/data.
 type FreeLLMAPIAdapter struct{}
 
 func (FreeLLMAPIAdapter) Type() string { return "freellmapi" }
@@ -35,7 +35,7 @@ func (FreeLLMAPIAdapter) HealthPath(r *store.Router) string {
 	if p := strConfig(r, "health_path"); p != "" {
 		return p
 	}
-	return "/v1/models"
+	return "/"
 }
 
 // ModelsPath is the OpenAI-compatible model listing endpoint.
@@ -56,26 +56,29 @@ func (FreeLLMAPIAdapter) NativePanelPath(r *store.Router) string {
 func (FreeLLMAPIAdapter) DeclaredVolumes(r *store.Router) []string {
 	dataPath := strConfig(r, "data_path")
 	if dataPath == "" {
-		dataPath = "/app/data"
+		dataPath = "/app/server/data"
 	}
-	return []string{dataPath}
+	return []string{dataPath, "/app/data"}
 }
 
 func (FreeLLMAPIAdapter) Mounts(r *store.Router) []string {
 	dataPath := strConfig(r, "data_path")
 	if dataPath == "" {
-		dataPath = "/app/data"
+		dataPath = "/app/server/data"
 	}
 	volume := "clever-route-" + r.Slug
-	return []string{volume + ":" + dataPath}
+	return []string{
+		volume + "-data:" + dataPath,
+		volume + "-app_data:/app/data",
+	}
 }
 
 // EnsurePermanentSecrets verifies that an ENCRYPTION_KEY exists for FreeLLMAPI.
-// If not present, it generates a 32-byte hex key, encrypts it, and returns updated env vars.
+// If not present, it generates a 32-byte hex key (64 chars), encrypts it, and returns updated env vars.
 func (FreeLLMAPIAdapter) EnsurePermanentSecrets(ctx context.Context, r *store.Router, box *secrets.Box) ([]store.EnvVariable, bool) {
 	hasKey := false
 	for _, item := range r.EnvVars {
-		if item.Key == "ENCRYPTION_KEY" && strings.TrimSpace(item.Value) != "" {
+		if item.Key == "ENCRYPTION_KEY" && len(strings.TrimSpace(item.Value)) >= 32 {
 			hasKey = true
 			break
 		}
@@ -107,7 +110,7 @@ func (FreeLLMAPIAdapter) Env(r *store.Router, decrypted map[string]string) []str
 	port := strconv.Itoa(FreeLLMAPIAdapter{}.InternalPort(r))
 	dataPath := strConfig(r, "data_path")
 	if dataPath == "" {
-		dataPath = "/app/data"
+		dataPath = "/app/server/data"
 	}
 
 	envMap := make(map[string]string)
@@ -141,7 +144,14 @@ func (FreeLLMAPIAdapter) Env(r *store.Router, decrypted map[string]string) []str
 		}
 	}
 
-	// 4. Inject decrypted provider credentials
+	// 4. Fallback ENCRYPTION_KEY if still missing in envMap
+	if _, exists := envMap["ENCRYPTION_KEY"]; !exists || len(envMap["ENCRYPTION_KEY"]) < 32 {
+		raw := make([]byte, 32)
+		_, _ = rand.Read(raw)
+		envMap["ENCRYPTION_KEY"] = hex.EncodeToString(raw)
+	}
+
+	// 5. Inject decrypted provider credentials
 	for provider, key := range decrypted {
 		upperProv := strings.ToUpper(strings.TrimSpace(provider))
 		envMap["FREELLMAPI_"+upperProv+"_KEY"] = key
@@ -152,7 +162,7 @@ func (FreeLLMAPIAdapter) Env(r *store.Router, decrypted map[string]string) []str
 		}
 	}
 
-	// 5. Convert map to KEY=VALUE slice
+	// 6. Convert map to KEY=VALUE slice
 	out := make([]string, 0, len(envMap))
 	for k, v := range envMap {
 		out = append(out, fmt.Sprintf("%s=%s", k, v))

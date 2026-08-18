@@ -249,6 +249,12 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 	if err != nil {
 		return fmt.Errorf("unknown adapter %q: %w", r.AdapterType, err)
 	}
+	// Auto-heal legacy or invalid image names for freellmapi:
+	if r.AdapterType == "freellmapi" && (r.ImageRef == "" || r.ImageRef == "tashfeenahmed/freellmapi:latest" || r.ImageRef == "tashfeenahmed/freellmapi") {
+		r.ImageRef = "ghcr.io/tashfeenahmed/freellmapi:latest"
+		_ = m.store.UpdateRouterImage(ctx, r.ID, r.ImageRef)
+	}
+
 	if !m.imageAllowed(r.ImageRef) {
 		_ = m.store.UpdateRouterState(ctx, r.ID, "failed", "", "", "", "unhealthy")
 		m.emitEvent(r.ID, "state_changed", map[string]any{
@@ -295,6 +301,13 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		"desired_state": "running",
 		"slug":          r.Slug,
 	})
+	m.emitEvent(r.ID, "log", map[string]any{
+		"data": fmt.Sprintf("[orchestrator] Initializing container for %s (%s)...", r.Slug, r.ImageRef),
+	})
+	logger.Info("router", r.Slug, fmt.Sprintf("Initializing container for %s (%s)...", r.Slug, r.ImageRef), store.Map{
+		"slug":  r.Slug,
+		"image": r.ImageRef,
+	})
 
 	// 1. Ensure permanent crypto keys & secrets are saved to DB
 	if savedEnv, modified := ad.EnsurePermanentSecrets(ctx, r, m.box); modified {
@@ -315,7 +328,7 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 	local := *r
 	_ = m.stopAndRemove(ctx, &local, false)
 
-	if err := m.ensureImage(ctx, r.ImageRef); err != nil {
+	if err := m.ensureImage(ctx, r, r.ImageRef); err != nil {
 		return fmt.Errorf("pull image: %w", err)
 	}
 
@@ -792,14 +805,24 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 
 // ----- internals -----
 
-func (m *Manager) ensureImage(ctx context.Context, ref string) error {
+func (m *Manager) ensureImage(ctx context.Context, r *store.Router, ref string) error {
 	// 1. Fast path: check if image is already present in the local Docker daemon
 	if _, _, err := m.docker.ImageInspectWithRaw(ctx, ref); err == nil {
 		log.Printf("[manager] image %s already cached locally; skipping pull", ref)
+		if r != nil {
+			m.emitEvent(r.ID, "log", map[string]any{
+				"data": fmt.Sprintf("[orchestrator] Image %s already cached locally.", ref),
+			})
+		}
 		return nil
 	}
 
 	log.Printf("[manager] pulling image %s from registry...", ref)
+	if r != nil {
+		m.emitEvent(r.ID, "log", map[string]any{
+			"data": fmt.Sprintf("[orchestrator] Pulling image %s from registry...", ref),
+		})
+	}
 	reader, err := m.docker.ImagePull(ctx, ref, image.PullOptions{})
 	if err != nil {
 		return fmt.Errorf("pull error: %w", err)
@@ -828,9 +851,27 @@ func (m *Manager) ensureImage(ctx context.Context, ref string) error {
 		if pullMsg.ErrorDetail.Message != "" {
 			return fmt.Errorf("docker pull failed: %s", pullMsg.ErrorDetail.Message)
 		}
+		if r != nil && pullMsg.Status != "" {
+			var line string
+			if pullMsg.ID != "" && pullMsg.Progress != "" {
+				line = fmt.Sprintf("[docker] %s: %s %s", pullMsg.ID, pullMsg.Status, pullMsg.Progress)
+			} else if pullMsg.ID != "" {
+				line = fmt.Sprintf("[docker] %s: %s", pullMsg.ID, pullMsg.Status)
+			} else {
+				line = fmt.Sprintf("[docker] %s", pullMsg.Status)
+			}
+			m.emitEvent(r.ID, "log", map[string]any{
+				"data": line,
+			})
+		}
 	}
 
 	log.Printf("[manager] successfully pulled image %s", ref)
+	if r != nil {
+		m.emitEvent(r.ID, "log", map[string]any{
+			"data": fmt.Sprintf("[orchestrator] Successfully pulled image %s", ref),
+		})
+	}
 	return nil
 }
 

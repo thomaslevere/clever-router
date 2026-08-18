@@ -205,6 +205,11 @@ func (s *Store) UpdateRouter(ctx context.Context, id, name string, config Map) e
 	return err
 }
 
+func (s *Store) UpdateRouterImage(ctx context.Context, id, imageRef string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE routers SET image_ref=$2, updated_at=now() WHERE id=$1`, id, imageRef)
+	return err
+}
+
 func (s *Store) UpdateRouterEnv(ctx context.Context, id string, envVars []EnvVariable, autoRestart bool) error {
 	b, err := json.Marshal(envVars)
 	if err != nil {

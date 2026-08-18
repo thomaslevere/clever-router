@@ -80,10 +80,12 @@ type Router struct {
 	Slug                   string        `json:"slug"`
 	Name                   string        `json:"name"`
 	AdapterType            string        `json:"adapter_type"`
+	ProviderType           string        `json:"provider_type,omitempty"`
 	ImageRef               string        `json:"image_ref"`
 	DesiredVersion         string        `json:"desired_version"`
 	CurrentVersion         string        `json:"current_version"`
 	EndpointPath           string        `json:"endpoint_path"`
+	RoutePath              string        `json:"route_path,omitempty"`
 	NativePanelURL         string        `json:"native_panel_url"`
 	DesiredState           string        `json:"desired_state"`
 	RuntimeState           string        `json:"runtime_state"`
@@ -237,6 +239,12 @@ func scanRouter(sc Scanner) (Router, error) {
 	r.EnvVars = []EnvVariable{}
 	if envVarsRaw != "" && envVarsRaw != "null" {
 		_ = json.Unmarshal([]byte(envVarsRaw), &r.EnvVars)
+	}
+	if r.ProviderType == "" {
+		r.ProviderType = r.AdapterType
+	}
+	if r.RoutePath == "" {
+		r.RoutePath = r.EndpointPath
 	}
 	return r, nil
 }

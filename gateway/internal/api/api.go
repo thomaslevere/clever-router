@@ -384,10 +384,12 @@ func maskRouterSecrets(r *store.Router) store.Router {
 type createRouterReq struct {
 	Slug                   string              `json:"slug" binding:"required"`
 	Name                   string              `json:"name" binding:"required"`
-	AdapterType            string              `json:"adapter_type" binding:"required"`
-	ImageRef               string              `json:"image_ref" binding:"required"`
+	AdapterType            string              `json:"adapter_type"`
+	ProviderType           string              `json:"provider_type"`
+	ImageRef               string              `json:"image_ref"`
 	DesiredVersion         string              `json:"desired_version"`
 	EndpointPath           string              `json:"endpoint_path"`
+	RoutePath              string              `json:"route_path"`
 	DesiredState           string              `json:"desired_state"`
 	Config                 store.Map           `json:"config"`
 	EnvVars                []store.EnvVariable `json:"env_vars"`
@@ -414,15 +416,39 @@ func (a *API) createRouter(c *gin.Context) {
 		return
 	}
 
+	// Normalize adapter/provider type and endpoint/route path
+	adapterType := req.AdapterType
+	if adapterType == "" {
+		adapterType = req.ProviderType
+	}
+	if adapterType == "" {
+		adapterType = "omniroute"
+	}
+
+	endpointPath := req.EndpointPath
+	if endpointPath == "" {
+		endpointPath = req.RoutePath
+	}
+	if endpointPath == "" {
+		endpointPath = "/" + req.Slug
+	}
+
+	imageRef := req.ImageRef
+	if imageRef == "" {
+		switch adapterType {
+		case "9router":
+			imageRef = "decolua/9router:latest"
+		default:
+			imageRef = "diegosouzapw/omniroute:latest"
+		}
+	}
+
 	// GAP-3 FIX: validate slug before writing to DB or passing to Docker.
 	if err := validateSlug(req.Slug); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	if req.EndpointPath == "" {
-		req.EndpointPath = "/" + req.Slug
-	}
 	if req.DesiredVersion == "" {
 		req.DesiredVersion = "latest"
 	}
@@ -461,9 +487,9 @@ func (a *API) createRouter(c *gin.Context) {
 	}
 
 	r := &store.Router{
-		Slug: req.Slug, Name: req.Name, AdapterType: req.AdapterType, ImageRef: req.ImageRef,
-		DesiredVersion: req.DesiredVersion, EndpointPath: req.EndpointPath,
-		DesiredState: req.DesiredState, Config: req.Config,
+		Slug: req.Slug, Name: req.Name, AdapterType: adapterType, ProviderType: adapterType,
+		ImageRef: imageRef, DesiredVersion: req.DesiredVersion, EndpointPath: endpointPath,
+		RoutePath: endpointPath, DesiredState: req.DesiredState, Config: req.Config,
 		EnvVars: cleanedEnv, AutoRestartOnEnvChange: req.AutoRestartOnEnvChange,
 	}
 	if err := a.store.CreateRouter(c, r); err != nil {

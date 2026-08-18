@@ -52,6 +52,9 @@ export default function AddRouterModal({
         slug: form.slug,
         name: form.name || form.slug,
         adapter_type: form.adapter_type,
+        provider_type: form.adapter_type,
+        endpoint_path: form.endpoint_path || "/" + form.slug,
+        route_path: form.endpoint_path || "/" + form.slug,
         image_ref: form.image_ref,
         desired_state: form.desired_state,
         env_vars,
@@ -91,14 +94,35 @@ export default function AddRouterModal({
               id="new-router-slug"
               className="input"
               required
-              placeholder="e.g. omniroute-prod"
+              placeholder="e.g. 9router or omniroute-prod"
               value={form.slug}
-              onChange={(e) =>
-                setForm((f) => ({ ...f, slug: e.target.value.toLowerCase() }))
-              }
+              onChange={(e) => {
+                const s = e.target.value.toLowerCase();
+                setForm((f) => ({
+                  ...f,
+                  slug: s,
+                  endpoint_path: f.endpoint_path === "" || f.endpoint_path === "/" + f.slug ? (s ? "/" + s : "") : f.endpoint_path,
+                }));
+              }}
             />
             <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-              Exposed namespaced endpoint at: <code className="text-brand">/{form.slug || "{slug}"}/v1/…</code>
+              Identifier for internal routing and Docker container naming.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1">
+              External Route Path
+            </label>
+            <input
+              id="new-router-endpoint-path"
+              className="input font-mono text-xs"
+              placeholder="e.g. /9router or /9router/v1"
+              value={form.endpoint_path || (form.slug ? "/" + form.slug : "")}
+              onChange={(e) => setForm((f) => ({ ...f, endpoint_path: e.target.value }))}
+            />
+            <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+              Exposed gateway API path: <code className="text-brand">{form.endpoint_path || (form.slug ? "/" + form.slug : "/{slug}")}/v1/…</code>
             </p>
           </div>
 
@@ -109,7 +133,7 @@ export default function AddRouterModal({
             <input
               id="new-router-name"
               className="input"
-              placeholder="e.g. OmniRoute Production Gateway"
+              placeholder="e.g. 9Router Production Aggregator"
               value={form.name}
               onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
             />

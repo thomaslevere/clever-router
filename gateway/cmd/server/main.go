@@ -128,6 +128,15 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	// Pre-flight: Auto-Restore S3 Snapshots to local scratch before booting
+	if bridge != nil {
+		restoreCtx, cancelRestore := context.WithTimeout(rootCtx, 45*time.Second)
+		if err := bridge.AutoRestoreFromS3(restoreCtx, cfg.VolumeScratchDir); err != nil {
+			log.Printf("[boot] warning: auto-restore from S3: %v", err)
+		}
+		cancelRestore()
+	}
+
 	// Background workers
 	go sup.Listen(rootCtx)
 	go checker.Run(rootCtx)
@@ -148,17 +157,29 @@ func main() {
 	// Graceful shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-	log.Println("==> SIGTERM/SIGINT received. Executing zero-loss graceful teardown...")
+	sig := <-quit
+	log.Printf("==> Termination signal %s received. Executing zero-loss graceful teardown...", sig.String())
 
-	// Stop all active child containers and flush their volumes to S3
-	shutdownFlushCtx, flushCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	// 1. Stop accepting inbound HTTP traffic
+	shutdownHttpCtx, httpCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer httpCancel()
+	_ = srv.Shutdown(shutdownHttpCtx)
+
+	// 2. Stop running router containers and flush their volumes to S3
+	shutdownFlushCtx, flushCancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer flushCancel()
 	mgr.StopAll(shutdownFlushCtx)
 
+	// 3. Final S3 flush of all router namespaces & logs
+	if bridge != nil {
+		log.Println("[shutdown] Flushing all router volumes and system snapshots to Cellar S3...")
+		if err := mgr.SyncAllToS3(shutdownFlushCtx); err != nil {
+			log.Printf("[shutdown] warning: S3 sync error: %v", err)
+		} else {
+			log.Println("[shutdown] All router namespaces successfully backed up to S3.")
+		}
+	}
+
 	rootCancel()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
-	log.Println("==> Graceful shutdown completed cleanly.")
+	log.Println("==> Graceful shutdown completed cleanly. Exiting.")
 }

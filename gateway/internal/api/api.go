@@ -1397,16 +1397,17 @@ func (a *API) manualS3Sync(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "router not found"})
 			return
 		}
-		localPath := filepath.Join(a.cfg.VolumeScratchDir, r.ID, "app_data")
-		s3Key := fmt.Sprintf("namespaces/%s/app_data.tar.zst", r.ID)
-		if err := a.bridge.StreamSnapshotToS3(c.Request.Context(), localPath, s3Key); err != nil {
+		if err := a.manager.Snapshot(c.Request.Context(), r); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("sync failed: %v", err)})
 			return
 		}
+		s3Key := fmt.Sprintf("namespaces/%s/app_data.tar.zst", r.ID)
 		a.audit(c, "storage.s3.sync", "router", r.ID, nil, store.Map{"slug": r.Slug, "key": s3Key})
 	} else {
-		// StopAll / sync all running routers and logs
-		a.manager.StopAll(c.Request.Context())
+		// Sync all running routers and logs to S3
+		if err := a.manager.SyncAllToS3(c.Request.Context()); err != nil {
+			log.Printf("[api] warning syncing routers to S3: %v", err)
+		}
 		if err := a.bridge.StreamSnapshotToS3(c.Request.Context(), "logs", "db/gateway_logs.tar.zst"); err != nil {
 			log.Printf("[api] warning syncing logs to S3: %v", err)
 		}
@@ -1436,19 +1437,23 @@ func (a *API) manualS3Restore(c *gin.Context) {
 		return
 	}
 
-	if err := a.manager.RestoreSnapshot(c.Request.Context(), r); err != nil {
+	// 1. If router was running, stop it to release SQLite WAL & file locks
+	wasRunning := r.RuntimeState == "running" || r.ContainerID != ""
+	if wasRunning {
+		if err := a.manager.Stop(c.Request.Context(), r); err != nil {
+			log.Printf("[api] warning stopping router before restore: %v", err)
+		}
+	}
+
+	// 2. Start router (which automatically performs pre-boot S3 hydration from candidate keys)
+	if err := a.manager.Start(c.Request.Context(), r); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("restore failed: %v", err)})
 		return
 	}
 
-	// Restart router to reload the restored database into runtime memory
-	if r.RuntimeState == "running" {
-		_ = a.manager.Restart(c.Request.Context(), r)
-	}
-
 	s3Key := fmt.Sprintf("namespaces/%s/app_data.tar.zst", r.ID)
 	a.audit(c, "storage.s3.restore", "router", r.ID, nil, store.Map{"slug": r.Slug, "key": s3Key})
-	c.JSON(http.StatusOK, gin.H{"status": "restored"})
+	c.JSON(http.StatusOK, gin.H{"status": "restored and reloaded"})
 }
 
 func (a *API) deleteS3Object(c *gin.Context) {

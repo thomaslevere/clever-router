@@ -353,13 +353,20 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 			if sanitized == "" {
 				sanitized = "data"
 			}
-			s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
+			candidateKeys := []string{
+				fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized),
+				fmt.Sprintf("namespaces/%s/%s.tar.zst", r.Slug, sanitized),
+				fmt.Sprintf("namespaces/%s/%s.tar.gz", r.ID, sanitized),
+				fmt.Sprintf("namespaces/%s/%s.tar.gz", r.Slug, sanitized),
+				fmt.Sprintf("namespaces/%s/%s.tar", r.ID, sanitized),
+				fmt.Sprintf("namespaces/%s/%s.tar", r.Slug, sanitized),
+			}
 			targetParent := filepath.Dir(targetVol)
 			if targetParent == "" || targetParent == "." {
 				targetParent = "/"
 			}
-			if err := m.bridge.HydrateContainer(ctx, m.docker, created.ID, s3Key, targetParent); err != nil {
-				log.Printf("[manager] hydrate warning for %s (%s): %v", r.Slug, s3Key, err)
+			if err := m.bridge.HydrateContainerCandidateKeys(ctx, m.docker, created.ID, candidateKeys, targetParent); err != nil {
+				log.Printf("[manager] hydrate warning for %s: %v", r.Slug, err)
 			}
 		}
 	}
@@ -493,15 +500,19 @@ func (m *Manager) Snapshot(ctx context.Context, r *store.Router) error {
 		if sanitized == "" {
 			sanitized = "data"
 		}
-		s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
-		if err := m.bridge.SnapshotContainer(ctx, m.docker, r.ContainerID, targetVol, s3Key); err != nil {
-			log.Printf("[manager] snapshot warning for %s (%s): %v", r.Slug, s3Key, err)
+		s3KeyID := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
+		if err := m.bridge.SnapshotContainer(ctx, m.docker, r.ContainerID, targetVol, s3KeyID); err != nil {
+			log.Printf("[manager] snapshot warning for %s (%s): %v", r.Slug, s3KeyID, err)
+		}
+		if r.Slug != "" && r.Slug != r.ID {
+			s3KeySlug := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.Slug, sanitized)
+			_ = m.bridge.SnapshotContainer(ctx, m.docker, r.ContainerID, targetVol, s3KeySlug)
 		}
 	}
 	return nil
 }
 
-// RestoreSnapshot hydrates the container from S3 snapshot.
+// RestoreSnapshot hydrates the container from S3 snapshot using candidate keys.
 func (m *Manager) RestoreSnapshot(ctx context.Context, r *store.Router) error {
 	if m.bridge == nil || r.ContainerID == "" {
 		return nil
@@ -519,13 +530,34 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, r *store.Router) error {
 		if sanitized == "" {
 			sanitized = "data"
 		}
-		s3Key := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
+		candidateKeys := []string{
+			fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized),
+			fmt.Sprintf("namespaces/%s/%s.tar.zst", r.Slug, sanitized),
+			fmt.Sprintf("namespaces/%s/%s.tar.gz", r.ID, sanitized),
+			fmt.Sprintf("namespaces/%s/%s.tar.gz", r.Slug, sanitized),
+			fmt.Sprintf("namespaces/%s/%s.tar", r.ID, sanitized),
+			fmt.Sprintf("namespaces/%s/%s.tar", r.Slug, sanitized),
+		}
 		targetParent := filepath.Dir(targetVol)
 		if targetParent == "" || targetParent == "." {
 			targetParent = "/"
 		}
-		if err := m.bridge.HydrateContainer(ctx, m.docker, r.ContainerID, s3Key, targetParent); err != nil {
+		if err := m.bridge.HydrateContainerCandidateKeys(ctx, m.docker, r.ContainerID, candidateKeys, targetParent); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// SyncAllToS3 snapshots all active routers to S3.
+func (m *Manager) SyncAllToS3(ctx context.Context) error {
+	routers, err := m.store.ListRouters(ctx)
+	if err != nil {
+		return err
+	}
+	for _, r := range routers {
+		if r.ContainerID != "" {
+			_ = m.Snapshot(ctx, &r)
 		}
 	}
 	return nil

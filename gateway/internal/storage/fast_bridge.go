@@ -3,6 +3,7 @@ package storage
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -78,7 +79,91 @@ func (b *FastVolumeBridge) GetRawObject(ctx context.Context, key string) (*minio
 	return b.client.GetObject(ctx, b.bucket, key, minio.GetObjectOptions{})
 }
 
-// HydrateFromS3 downloads and extracts a .tar.zst archive from S3 into targetDir.
+// openArchiveStream returns an io.ReadCloser that transparently decompresses Zstandard, Gzip,
+// or passes through uncompressed tar streams based on magic header bytes.
+func openArchiveStream(body io.Reader) (io.ReadCloser, error) {
+	buf := make([]byte, 4)
+	n, err := io.ReadFull(body, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+	combined := io.MultiReader(bytes.NewReader(buf[:n]), body)
+
+	// Check Zstandard magic: 0x28, 0xB5, 0x2F, 0xFD
+	if n >= 4 && buf[0] == 0x28 && buf[1] == 0xb5 && buf[2] == 0x2f && buf[3] == 0xfd {
+		zr, zerr := zstd.NewReader(combined)
+		if zerr != nil {
+			return nil, zerr
+		}
+		return zr.IOReadCloser(), nil
+	}
+
+	// Check Gzip magic: 0x1F, 0x8B
+	if n >= 2 && buf[0] == 0x1f && buf[1] == 0x8b {
+		gr, gerr := gzip.NewReader(combined)
+		if gerr != nil {
+			return nil, gerr
+		}
+		return gr, nil
+	}
+
+	// Uncompressed tar stream
+	return io.NopCloser(combined), nil
+}
+
+// AutoRestoreFromS3 scans Cellar S3 for all snapshots under namespaces/ and pre-restores them to local storage.
+func (b *FastVolumeBridge) AutoRestoreFromS3(ctx context.Context, localDataDir string) error {
+	if b.client == nil {
+		return nil
+	}
+	log.Printf("[boot] Starting pre-flight S3 auto-restore from bucket %q...", b.bucket)
+
+	if err := os.MkdirAll(localDataDir, 0777); err != nil {
+		return fmt.Errorf("failed to create base local data directory: %w", err)
+	}
+
+	opts := minio.ListObjectsOptions{
+		Prefix:    "namespaces/",
+		Recursive: true,
+	}
+
+	restoredCount := 0
+	for obj := range b.client.ListObjects(ctx, b.bucket, opts) {
+		if obj.Err != nil {
+			log.Printf("[boot] warning: list S3 object error: %v", obj.Err)
+			continue
+		}
+		if obj.Size <= 32 {
+			continue
+		}
+
+		key := obj.Key
+		parts := strings.Split(key, "/")
+		if len(parts) < 3 {
+			continue
+		}
+		namespace := parts[1]
+		volFile := parts[2]
+		sanitized := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSuffix(volFile, ".tar.zst"), ".tar.gz"), ".tar")
+		if sanitized == "" {
+			sanitized = "data"
+		}
+
+		targetDir := filepath.Join(localDataDir, namespace, sanitized)
+		log.Printf("[boot] Found snapshot in S3: %s (size: %d bytes), extracting to %s...", key, obj.Size, targetDir)
+
+		if err := b.HydrateFromS3(ctx, key, targetDir); err != nil {
+			log.Printf("[boot] warning: failed to restore %s: %v", key, err)
+			continue
+		}
+		restoredCount++
+	}
+
+	log.Printf("[boot] S3 auto-restore complete. Restored %d volume snapshot(s).", restoredCount)
+	return nil
+}
+
+// HydrateFromS3 downloads and extracts an archive (.tar.zst, .tar.gz, .tar) from S3 into targetDir.
 // If the archive does not exist yet (fresh boot), it returns nil.
 func (b *FastVolumeBridge) HydrateFromS3(ctx context.Context, s3Key, targetDir string) error {
 	mu := b.getLock(s3Key)
@@ -96,7 +181,7 @@ func (b *FastVolumeBridge) HydrateFromS3(ctx context.Context, s3Key, targetDir s
 		// Key not found or empty - this is expected on first boot
 		return nil
 	}
-	if stat.Size == 0 {
+	if stat.Size <= 32 {
 		return nil
 	}
 
@@ -105,13 +190,13 @@ func (b *FastVolumeBridge) HydrateFromS3(ctx context.Context, s3Key, targetDir s
 	}
 	_ = os.Chmod(targetDir, 0777)
 
-	zr, err := zstd.NewReader(obj)
+	decompStream, err := openArchiveStream(obj)
 	if err != nil {
-		return fmt.Errorf("zstd reader for %s: %w", s3Key, err)
+		return fmt.Errorf("open archive stream for %s: %w", s3Key, err)
 	}
-	defer zr.Close()
+	defer decompStream.Close()
 
-	tr := tar.NewReader(zr)
+	tr := tar.NewReader(decompStream)
 	count := 0
 	for {
 		header, err := tr.Next()
@@ -253,85 +338,102 @@ func (b *FastVolumeBridge) StreamSnapshotToS3(ctx context.Context, sourceDir, s3
 	return nil
 }
 
-// HydrateContainer downloads a .tar.zst snapshot from S3, decompresses it, normalizes all tar UID/GIDs to 0 (root),
+// HydrateContainer downloads a snapshot from S3, decompresses it, normalizes all tar UID/GIDs to 0 (root),
 // and copies it directly into the target container directory via Docker API.
 func (b *FastVolumeBridge) HydrateContainer(ctx context.Context, cli *client.Client, containerID, s3Key, targetParentDir string) error {
+	return b.HydrateContainerCandidateKeys(ctx, cli, containerID, []string{s3Key}, targetParentDir)
+}
+
+// HydrateContainerCandidateKeys tries each candidate s3Key in order and extracts the first valid snapshot into the container.
+func (b *FastVolumeBridge) HydrateContainerCandidateKeys(ctx context.Context, cli *client.Client, containerID string, candidateKeys []string, targetParentDir string) error {
 	if b.client == nil || cli == nil {
 		return nil
 	}
-	mu := b.getLock(s3Key)
-	mu.Lock()
-	defer mu.Unlock()
 
-	obj, err := b.client.GetObject(ctx, b.bucket, s3Key, minio.GetObjectOptions{})
-	if err != nil {
-		return err
-	}
-	defer obj.Close()
+	for _, s3Key := range candidateKeys {
+		mu := b.getLock(s3Key)
+		mu.Lock()
 
-	stat, err := obj.Stat()
-	if err != nil {
-		// Key not found in S3 (fresh boot)
-		return nil
-	}
-	if stat.Size <= 32 { // Empty or header-only archive
-		return nil
-	}
-
-	zr, err := zstd.NewReader(obj)
-	if err != nil {
-		return fmt.Errorf("zstd reader for %s: %w", s3Key, err)
-	}
-	defer zr.Close()
-
-	pr, pw := io.Pipe()
-	go func() {
-		tr := tar.NewReader(zr)
-		tw := tar.NewWriter(pw)
-		defer func() {
-			_ = tw.Close()
-			_ = pw.Close()
-		}()
-
-		for {
-			header, err := tr.Next()
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				_ = pw.CloseWithError(err)
-				return
-			}
-
-			// CRITICAL FIX: Normalize UID and GID to 0 (root) so Docker userns remap never rejects the archive
-			header.Uid = 0
-			header.Gid = 0
-			header.Uname = ""
-			header.Gname = ""
-			if header.Typeflag == tar.TypeDir {
-				header.Mode = 0777
-			} else {
-				header.Mode = 0666
-			}
-
-			if err := tw.WriteHeader(header); err != nil {
-				_ = pw.CloseWithError(err)
-				return
-			}
-			if _, err := io.Copy(tw, tr); err != nil {
-				_ = pw.CloseWithError(err)
-				return
-			}
+		obj, err := b.client.GetObject(ctx, b.bucket, s3Key, minio.GetObjectOptions{})
+		if err != nil {
+			mu.Unlock()
+			continue
 		}
-	}()
 
-	err = cli.CopyToContainer(ctx, containerID, targetParentDir, pr, container.CopyToContainerOptions{
-		AllowOverwriteDirWithFile: true,
-	})
-	if err != nil {
-		return fmt.Errorf("docker copy to container %s (%s): %w", containerID[:12], targetParentDir, err)
+		stat, err := obj.Stat()
+		if err != nil || stat.Size <= 32 {
+			obj.Close()
+			mu.Unlock()
+			continue
+		}
+
+		log.Printf("[fast-bridge] Found valid snapshot %s (size: %d bytes) in S3. Hydrating into container %s:%s...", s3Key, stat.Size, containerID[:12], targetParentDir)
+
+		decompStream, err := openArchiveStream(obj)
+		if err != nil {
+			obj.Close()
+			mu.Unlock()
+			log.Printf("[fast-bridge] decompress stream error for %s: %v", s3Key, err)
+			continue
+		}
+
+		pr, pw := io.Pipe()
+		go func(key string, stream io.ReadCloser, o *minio.Object, lock *sync.Mutex) {
+			defer o.Close()
+			defer stream.Close()
+			defer lock.Unlock()
+
+			tr := tar.NewReader(stream)
+			tw := tar.NewWriter(pw)
+			defer func() {
+				_ = tw.Close()
+				_ = pw.Close()
+			}()
+
+			for {
+				header, err := tr.Next()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					_ = pw.CloseWithError(err)
+					return
+				}
+
+				// Normalize UID and GID to 0 (root) so Docker userns remap never rejects the archive
+				header.Uid = 0
+				header.Gid = 0
+				header.Uname = ""
+				header.Gname = ""
+				if header.Typeflag == tar.TypeDir {
+					header.Mode = 0777
+				} else {
+					header.Mode = 0666
+				}
+
+				if err := tw.WriteHeader(header); err != nil {
+					_ = pw.CloseWithError(err)
+					return
+				}
+				if _, err := io.Copy(tw, tr); err != nil {
+					_ = pw.CloseWithError(err)
+					return
+				}
+			}
+		}(s3Key, decompStream, obj, mu)
+
+		err = cli.CopyToContainer(ctx, containerID, targetParentDir, pr, container.CopyToContainerOptions{
+			AllowOverwriteDirWithFile: true,
+		})
+		if err != nil {
+			log.Printf("[fast-bridge] docker copy to container %s failed for %s: %v", containerID[:12], s3Key, err)
+			continue
+		}
+
+		log.Printf("[fast-bridge] successfully hydrated %s from s3://%s/%s into container %s:%s", s3Key, b.bucket, s3Key, containerID[:12], targetParentDir)
+		return nil
 	}
-	log.Printf("[fast-bridge] successfully hydrated %s from s3://%s/%s into container %s:%s", s3Key, b.bucket, s3Key, containerID[:12], targetParentDir)
+
 	return nil
 }
 

@@ -764,7 +764,7 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 	return nil
 }
 
-// HealthCheck probes the router and records the result.
+// HealthCheck probes the router and records the result with automatic candidate IP failover.
 func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 	ad, err := m.reg.Get(r.AdapterType)
 	if err != nil {
@@ -779,22 +779,58 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 		})
 		return fmt.Errorf("no target address")
 	}
-	url := strings.TrimRight(r.TargetAddr, "/") + ad.HealthPath(r)
+
+	targetAddr := r.TargetAddr
+	url := strings.TrimRight(targetAddr, "/") + ad.HealthPath(r)
 	start := time.Now()
-	_, err = httpGet(ctx, url, 5*time.Second)
-	latency := time.Since(start).Milliseconds()
-	if err != nil {
-		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", int(latency), err.Error())
+
+	// Probe current targetAddr (HTTP < 500 indicates server is alive)
+	probeClient := &http.Client{Timeout: 3 * time.Second}
+	req, reqErr := http.NewRequestWithContext(ctx, "GET", url, nil)
+	var probeErr error
+	var latency int64
+
+	if reqErr == nil {
+		resp, err := probeClient.Do(req)
+		latency = time.Since(start).Milliseconds()
+		if err != nil || (resp != nil && resp.StatusCode >= 500) {
+			if resp != nil {
+				resp.Body.Close()
+				probeErr = fmt.Errorf("status %d", resp.StatusCode)
+			} else {
+				probeErr = err
+			}
+		} else if resp != nil {
+			resp.Body.Close()
+		}
+	} else {
+		probeErr = reqErr
+	}
+
+	// If current targetAddr failed, attempt automatic failover to other working candidate IPs
+	if probeErr != nil && r.ContainerID != "" {
+		if newWorkingAddr, ok := m.checkAnyWorking(ctx, r.ContainerID, ad.InternalPort(r), ad.HealthPath(r)); ok {
+			targetAddr = newWorkingAddr
+			probeErr = nil
+			_ = m.store.UpdateRouterState(ctx, r.ID, r.RuntimeState, newWorkingAddr, r.ContainerID, r.NativePanelURL, "healthy")
+			_ = m.cache.SetRoute(ctx, r.Slug, newWorkingAddr)
+			m.table.Set(r.Slug, newWorkingAddr)
+		}
+	}
+
+	if probeErr != nil {
+		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", int(latency), probeErr.Error())
 		_ = m.store.UpdateRouterState(ctx, r.ID, r.RuntimeState, r.TargetAddr, r.ContainerID, r.NativePanelURL, "unhealthy")
 		m.emitEvent(r.ID, "state_changed", map[string]any{
 			"health_status": "unhealthy",
 			"runtime_state": r.RuntimeState,
 			"slug":          r.Slug,
 		})
-		return err
+		return probeErr
 	}
+
 	_ = m.store.InsertHealthCheck(ctx, r.ID, "healthy", int(latency), "")
-	_ = m.store.UpdateRouterState(ctx, r.ID, r.RuntimeState, r.TargetAddr, r.ContainerID, r.NativePanelURL, "healthy")
+	_ = m.store.UpdateRouterState(ctx, r.ID, r.RuntimeState, targetAddr, r.ContainerID, r.NativePanelURL, "healthy")
 	m.emitEvent(r.ID, "state_changed", map[string]any{
 		"health_status": "healthy",
 		"runtime_state": r.RuntimeState,

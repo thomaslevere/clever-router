@@ -226,7 +226,7 @@ export default function RouterDetailPage() {
               {(panelUrl || realtime.nativePanelUrl) && (
                 <div className="flex items-center gap-2 flex-wrap pt-1">
                   <span className="font-medium text-slate-600 dark:text-slate-300">Native Dashboard:</span>
-                  {isRunning && realtime.healthStatus === "healthy" ? (
+                  {isRunning || currentRuntime === "running" ? (
                     <>
                       <a
                         className="text-brand hover:underline font-semibold font-mono text-xs inline-flex items-center gap-1.5 bg-brand/10 dark:bg-brand/20 text-brand px-2.5 py-1 rounded-md transition hover:bg-brand/20 dark:hover:bg-brand/30"

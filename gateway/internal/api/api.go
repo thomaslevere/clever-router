@@ -438,6 +438,8 @@ func (a *API) createRouter(c *gin.Context) {
 		switch adapterType {
 		case "9router":
 			imageRef = "decolua/9router:latest"
+		case "freellmapi":
+			imageRef = "tashfeenahmed/freellmapi:latest"
 		default:
 			imageRef = "diegosouzapw/omniroute:latest"
 		}

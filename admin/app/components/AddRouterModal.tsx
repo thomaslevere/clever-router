@@ -7,6 +7,7 @@ import type { Router } from "../lib/types";
 const adapters = [
   { value: "omniroute", label: "OmniRoute", image: "diegosouzapw/omniroute:latest" },
   { value: "9router", label: "9Router", image: "decolua/9router:latest" },
+  { value: "freellmapi", label: "FreeLLMAPI", image: "tashfeenahmed/freellmapi:latest" },
   { value: "litellm", label: "LiteLLM", image: "ghcr.io/berriai/litellm:main-stable" },
   { value: "custom", label: "Custom Gateway", image: "" },
 ];
@@ -200,6 +201,22 @@ export default function AddRouterModal({
               </div>
               <p className="text-[11px] text-slate-600 dark:text-slate-300">
                 Optimized for high-throughput proxying with RTK token compression, 3-tier fallback routing (Subscription → Cheap → Free), and OpenAI-compatible endpoints.
+              </p>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
+                <span>Multi-core acceleration:</span>
+                <span className="font-mono text-emerald-600 dark:text-emerald-400 font-bold">12 vCPUs / 8 GB</span>
+              </div>
+            </div>
+          )}
+
+          {form.adapter_type === "freellmapi" && (
+            <div className="space-y-2 rounded-lg bg-emerald-500/5 dark:bg-emerald-500/10 p-3.5 border border-emerald-500/20">
+              <div className="flex items-center gap-2 font-semibold text-emerald-600 dark:text-emerald-400 text-xs">
+                <span>🌐</span>
+                <span>FreeLLMAPI AI Aggregator Engine</span>
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                Aggregates free-tier AI providers (HuggingFace, Groq, Cohere, Cloudflare, etc.) with automatic rate-limit tracking, failover routing, and AES-256 encrypted credential storage.
               </p>
               <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
                 <span>Multi-core acceleration:</span>

@@ -74,7 +74,7 @@ clever env set CC_DOCKER_EXPOSED_HTTP_PORT 8080 --alias "${ALIAS}"
 clever env set CC_HEALTH_CHECK_PATH /healthz --alias "${ALIAS}"
 clever env set CC_MOUNT_DOCKER_SOCKET true --alias "${ALIAS}"
 clever env set APP_ENV "production" --alias "${ALIAS}"
-clever env set ALLOWED_IMAGES "diegosouzapw/omniroute:latest,decolua/9router:latest,ghcr.io/decolua/9router:latest,9router/9router:latest,ghcr.io/berriai/litellm:main-stable" --alias "${ALIAS}"
+clever env set ALLOWED_IMAGES "diegosouzapw/omniroute:latest,decolua/9router:latest,ghcr.io/decolua/9router:latest,9router/9router:latest,tashfeenahmed/freellmapi:latest,ghcr.io/tashfeenahmed/freellmapi:latest,ghcr.io/berriai/litellm:main-stable" --alias "${ALIAS}"
 clever env set CELLAR_BUCKET "clever-router-storage" --alias "${ALIAS}"
 clever env set VOLUME_SCRATCH_DIR "/tmp/clever_router_volumes" --alias "${ALIAS}"
 

@@ -80,7 +80,7 @@ func NewManager(st *store.Store, c *cache.Cache, box *secrets.Box, reg *Registry
 	for _, a := range allowed {
 		allow[strings.ToLower(strings.TrimSpace(a))] = true
 	}
-	// Always allow core supported router images (OmniRoute, 9Router, LiteLLM)
+	// Always allow core supported router images (OmniRoute, 9Router, FreeLLMAPI, LiteLLM)
 	coreImages := []string{
 		"diegosouzapw/omniroute:latest",
 		"diegosouzapw/omniroute",
@@ -90,6 +90,12 @@ func NewManager(st *store.Store, c *cache.Cache, box *secrets.Box, reg *Registry
 		"ghcr.io/decolua/9router",
 		"9router/9router:latest",
 		"9router/9router",
+		"tashfeenahmed/freellmapi:latest",
+		"tashfeenahmed/freellmapi",
+		"ghcr.io/tashfeenahmed/freellmapi:latest",
+		"ghcr.io/tashfeenahmed/freellmapi",
+		"freellmapi/freellmapi:latest",
+		"freellmapi/freellmapi",
 		"ghcr.io/berriai/litellm:main-stable",
 		"ghcr.io/berriai/litellm",
 	}
@@ -175,11 +181,12 @@ func (m *Manager) ensureNetwork(ctx context.Context) error {
 	return nil
 }
 
-// imageAllowed enforces the allowlist. Official core images (OmniRoute, 9Router, LiteLLM) are always permitted.
+// imageAllowed enforces the allowlist. Official core images (OmniRoute, 9Router, FreeLLMAPI, LiteLLM) are always permitted.
 func (m *Manager) imageAllowed(ref string) bool {
 	clean := strings.ToLower(strings.TrimSpace(ref))
 	if strings.Contains(clean, "omniroute") ||
 		strings.Contains(clean, "9router") ||
+		strings.Contains(clean, "freellmapi") ||
 		strings.Contains(clean, "litellm") {
 		return true
 	}

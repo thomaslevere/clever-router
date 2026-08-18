@@ -129,6 +129,32 @@ export default function EnvironmentVariablesCard({
     setTimeout(() => setStatusMsg(null), 3000);
   };
 
+  // Load baseline preset for FreeLLMAPI
+  const loadFreeLLMAPIPreset = () => {
+    isDirty.current = true;
+    const preset: EnvVariable[] = [
+      { key: "PORT", value: "3001", is_secret: false },
+      { key: "DATA_DIR", value: "/app/data", is_secret: false },
+      { key: "HOST_BIND", value: "0.0.0.0", is_secret: false },
+      { key: "NODE_ENV", value: "production", is_secret: false },
+      { key: "UV_THREADPOOL_SIZE", value: "12", is_secret: false },
+      { key: "NODE_OPTIONS", value: "--max-old-space-size=4096", is_secret: false },
+      { key: "GOMAXPROCS", value: "12", is_secret: false },
+      { key: "WEB_CONCURRENCY", value: "auto", is_secret: false },
+    ];
+
+    const currentKeys = new Set(envs.map((e) => e.key.trim().toUpperCase()));
+    const merged = [...envs];
+    for (const p of preset) {
+      if (!currentKeys.has(p.key)) {
+        merged.push(p);
+      }
+    }
+    setEnvs(merged);
+    setStatusMsg({ type: "success", text: "FreeLLMAPI preset variables added to list." });
+    setTimeout(() => setStatusMsg(null), 3000);
+  };
+
   // Convert raw .env text to structured array
   const parseRawEnv = (text: string) => {
     isDirty.current = true;
@@ -275,6 +301,18 @@ export default function EnvironmentVariablesCard({
             >
               <span>⚡</span>
               <span>9Router Preset</span>
+            </button>
+          )}
+
+          {adapterType === "freellmapi" && (
+            <button
+              type="button"
+              onClick={loadFreeLLMAPIPreset}
+              className="btn-ghost text-xs px-2.5 py-1.5 flex items-center gap-1.5 hover:border-emerald-500/40 text-emerald-600 dark:text-emerald-400"
+              title="Load FreeLLMAPI multi-core presets"
+            >
+              <span>⚡</span>
+              <span>FreeLLMAPI Preset</span>
             </button>
           )}
 

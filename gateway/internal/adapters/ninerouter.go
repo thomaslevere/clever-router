@@ -85,6 +85,7 @@ func (NineRouterAdapter) Env(r *store.Router, decrypted map[string]string) []str
 	envMap["NODE_ENV"] = "production"
 	envMap["PORT"] = port
 	envMap["DATA_DIR"] = dataPath
+	envMap["HOME"] = dataPath
 	envMap["HOSTNAME"] = "0.0.0.0"
 
 	// Multi-core and concurrency optimization (Host has 12 vCPUs / 24 GB RAM shared)

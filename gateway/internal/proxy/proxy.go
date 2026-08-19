@@ -180,7 +180,9 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 		if cleanPath == "open" || cleanPath == "dashboard" || cleanPath == "login" || cleanPath == "" {
 			c.SetCookie("cr_active_router", targetSlug, 86400*7, "/", "", false, false)
 			dest := "/dashboard"
-			if strings.Contains(low, "litellm") {
+			if strings.Contains(low, "bifrost") {
+				dest = "/workspace/logs"
+			} else if strings.Contains(low, "litellm") {
 				dest = fmt.Sprintf("/%s/ui/", targetSlug)
 			} else if strings.Contains(low, "freellm") {
 				if cleanPath == "login" {

@@ -51,7 +51,7 @@ func (BifrostAdapter) NativePanelPath(r *store.Router) string {
 	if p := strConfig(r, "native_panel_path"); p != "" {
 		return p
 	}
-	return "/"
+	return "/workspace/logs"
 }
 
 func (BifrostAdapter) DeclaredVolumes(r *store.Router) []string {

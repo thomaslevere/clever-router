@@ -73,6 +73,13 @@ func (p *Proxy) Handle(c *gin.Context) {
 
 	// Root path or empty slug: return clean service info instead of 502.
 	if slug == "" {
+		// If an active router session exists (from /:slug/open), forward root requests to the active router UI
+		if cookie, err := c.Cookie("cr_active_router"); err == nil && cookie != "" {
+			if _, found := p.table.Lookup(cookie); found {
+				p.handleRequest(c)
+				return
+			}
+		}
 		c.JSON(200, gin.H{
 			"service": "CleverRoute",
 			"status":  "ok",

@@ -181,7 +181,7 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 			c.SetCookie("cr_active_router", targetSlug, 86400*7, "/", "", false, false)
 			dest := "/dashboard"
 			if strings.Contains(low, "bifrost") {
-				dest = "/workspace/logs"
+				dest = "/overview"
 			} else if strings.Contains(low, "litellm") {
 				dest = fmt.Sprintf("/%s/ui/", targetSlug)
 			} else if strings.Contains(low, "freellm") {

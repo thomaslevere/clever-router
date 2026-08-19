@@ -122,7 +122,9 @@ export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: strin
   const base = window.location.origin;
 
   let targetPath = `/${slug}/open`;
-  if (router.adapter_type === "portkey" || slug.toLowerCase().includes("portkey")) {
+  if (router.adapter_type === "bifrost" || slug.toLowerCase().includes("bifrost")) {
+    targetPath = `/${slug}/open`;
+  } else if (router.adapter_type === "portkey" || slug.toLowerCase().includes("portkey")) {
     targetPath = `/${slug}/open`;
   } else if (router.adapter_type === "litellm" || slug.toLowerCase().includes("litellm")) {
     targetPath = `/${slug}/ui/`;

@@ -71,15 +71,8 @@ type proxyError struct {
 func (p *Proxy) Handle(c *gin.Context) {
 	slug := c.Param("slug")
 
-	// Root path or empty slug: return clean service info instead of 502.
-	if slug == "" {
-		// If an active router session exists (from /:slug/open), forward root requests to the active router UI
-		if cookie, err := c.Cookie("cr_active_router"); err == nil && cookie != "" {
-			if _, found := p.table.Lookup(cookie); found {
-				p.handleRequest(c)
-				return
-			}
-		}
+	// Root path or empty slug: ALWAYS return clean service info and NEVER forward or hijack to any router UI!
+	if slug == "" || c.Request.URL.Path == "/" {
 		c.JSON(200, gin.H{
 			"service": "CleverRoute",
 			"status":  "ok",
@@ -684,7 +677,12 @@ window.__ROUTER_SLUG__ = "%s";
 }
 
 func (p *Proxy) findFallbackRouter(c *gin.Context) (string, string) {
-	// 1. Check cr_active_router cookie
+	// Root URL must never be proxied to a fallback router
+	if c.Request.URL.Path == "/" || c.Request.URL.Path == "" {
+		return "", ""
+	}
+
+	// 1. Check cr_active_router cookie (for static assets /_next/*, /assets/*, /api/*, etc.)
 	if cookie, err := c.Cookie("cr_active_router"); err == nil && cookie != "" {
 		if t, ok := p.table.Lookup(cookie); ok {
 			return cookie, t
@@ -699,14 +697,6 @@ func (p *Proxy) findFallbackRouter(c *gin.Context) (string, string) {
 			if strings.Contains(referer, "/"+s+"/") || strings.Contains(referer, "/"+s+"?") || strings.HasSuffix(referer, "/"+s) {
 				return s, t
 			}
-		}
-	}
-
-	// 3. If exactly 1 router is active in the table, fallback to it
-	snap := p.table.Snapshot()
-	if len(snap) == 1 {
-		for s, t := range snap {
-			return s, t
 		}
 	}
 

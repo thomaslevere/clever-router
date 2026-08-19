@@ -188,7 +188,14 @@ func (a *API) Register(r *gin.Engine) {
 	// Example: /omnirouter/v1/chat/completions (API)
 	// Example: /omnirouter/dashboard           (native UI)
 	p := proxy.New(a.table, keys.NewAuth(a.store, a.cache), a.store, a.cache, a.cfg)
-	r.GET("/", p.Handle)
+	r.GET("/", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"service": "CleverRoute",
+			"status":  "ok",
+			"admin":   "/admin",
+			"docs":    "Use /:slug/v1/* to access router APIs",
+		})
+	})
 	r.NoRoute(p.Handle)
 	r.Any("/:slug", p.Handle)
 	r.Any("/:slug/*path", p.Handle)

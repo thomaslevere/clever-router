@@ -180,19 +180,19 @@ func (s *Store) UpdateRouterState(ctx context.Context, id, runtimeState, targetA
 	_, err := s.Pool.Exec(ctx, `
 		UPDATE routers SET runtime_state=$2, target_addr=$3, container_id=$4, native_panel_url=$5,
 		                   health_status=$6, last_seen_at=now(), updated_at=now()
-		WHERE id=$1`,
+		WHERE id::text=$1 OR slug=$1`,
 		id, runtimeState, targetAddr, containerID, nativePanelURL, health)
 	return err
 }
 
 func (s *Store) UpdateRouterCounts(ctx context.Context, id string, providers, models int) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE routers SET providers_count=$2, models_count=$3, updated_at=now() WHERE id=$1`,
+	_, err := s.Pool.Exec(ctx, `UPDATE routers SET providers_count=$2, models_count=$3, updated_at=now() WHERE id::text=$1 OR slug=$1`,
 		id, providers, models)
 	return err
 }
 
 func (s *Store) SetDesiredState(ctx context.Context, id, state string) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE routers SET desired_state=$2, desired_status=$2, updated_at=now() WHERE id=$1`, id, state)
+	_, err := s.Pool.Exec(ctx, `UPDATE routers SET desired_state=$2, desired_status=$2, updated_at=now() WHERE id::text=$1 OR slug=$1`, id, state)
 	return err
 }
 

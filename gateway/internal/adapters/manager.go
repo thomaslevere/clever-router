@@ -757,9 +757,6 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 			addr = working
 		}
 	}
-	if addr == "" {
-		return fmt.Errorf("router target address is empty or not yet reachable")
-	}
 
 	// Collect potential auth tokens
 	var authTokens []string
@@ -783,29 +780,31 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 	candidatePaths := []string{ad.ModelsPath(r), "/v1/models", "/models"}
 	var body []byte
 
-	for _, p := range candidatePaths {
-		if p == "" {
-			continue
-		}
-		url := strings.TrimRight(addr, "/") + p
+	if addr != "" {
+		for _, p := range candidatePaths {
+			if p == "" {
+				continue
+			}
+			url := strings.TrimRight(addr, "/") + p
 
-		// 1. Try with discovered auth tokens
-		for _, token := range authTokens {
-			b, err := httpGetWithAuth(ctx, url, token, 8*time.Second)
+			// 1. Try with discovered auth tokens
+			for _, token := range authTokens {
+				b, err := httpGetWithAuth(ctx, url, token, 8*time.Second)
+				if err == nil && len(b) > 0 {
+					body = b
+					break
+				}
+			}
+			if len(body) > 0 {
+				break
+			}
+
+			// 2. Try unauthenticated
+			b, err := httpGet(ctx, url, 8*time.Second)
 			if err == nil && len(b) > 0 {
 				body = b
 				break
 			}
-		}
-		if len(body) > 0 {
-			break
-		}
-
-		// 2. Try unauthenticated
-		b, err := httpGet(ctx, url, 8*time.Second)
-		if err == nil && len(b) > 0 {
-			body = b
-			break
 		}
 	}
 

@@ -317,6 +317,23 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 			}
 			continue
 		}
+		// Rewrite Link preload headers (e.g. </_next/static/media/font.woff2>; rel=preload)
+		// to include the subpath prefix so preloaded resources are found.
+		if isHTML && strings.EqualFold(k, "Link") {
+			for _, v := range vs {
+				// Rewrite root-relative paths inside angle brackets: </path> → </prefix/path>
+				rewritten := v
+				if strings.Contains(rewritten, "</") {
+					rewritten = strings.ReplaceAll(rewritten, "</_next/", fmt.Sprintf("<%s/_next/", prefix))
+					rewritten = strings.ReplaceAll(rewritten, "</static/", fmt.Sprintf("<%s/static/", prefix))
+					rewritten = strings.ReplaceAll(rewritten, "</assets/", fmt.Sprintf("<%s/assets/", prefix))
+					rewritten = strings.ReplaceAll(rewritten, "</favicon", fmt.Sprintf("<%s/favicon", prefix))
+					rewritten = strings.ReplaceAll(rewritten, "</manifest", fmt.Sprintf("<%s/manifest", prefix))
+				}
+				c.Writer.Header().Add(k, rewritten)
+			}
+			continue
+		}
 		for _, v := range vs {
 			c.Writer.Header().Add(k, v)
 		}
@@ -440,6 +457,16 @@ func (p *Proxy) transformHTML(raw []byte, prefix, slug string) []byte {
 	htmlStr = strings.ReplaceAll(htmlStr, `href="/static/`, fmt.Sprintf(`href="%s/static/`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `src="/assets/`, fmt.Sprintf(`src="%s/assets/`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `href="/assets/`, fmt.Sprintf(`href="%s/assets/`, prefix))
+
+	// Rewrite common root-relative PWA/meta resources (manifest, icons, favicons, etc.)
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/manifest.webmanifest"`, fmt.Sprintf(`href="%s/manifest.webmanifest"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/manifest.json"`, fmt.Sprintf(`href="%s/manifest.json"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/favicon.ico"`, fmt.Sprintf(`href="%s/favicon.ico"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/favicon.svg"`, fmt.Sprintf(`href="%s/favicon.svg"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/icon-`, fmt.Sprintf(`href="%s/icon-`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/apple-touch-icon`, fmt.Sprintf(`href="%s/apple-touch-icon`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `src="/favicon`, fmt.Sprintf(`src="%s/favicon`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `src="/icon-`, fmt.Sprintf(`src="%s/icon-`, prefix))
 
 	// 3. Inject <base> tag and client-side history guard into <head>
 	clientGuardScript := fmt.Sprintf(`<base href="%s/" /><script>
@@ -584,11 +611,17 @@ func isWebOrAssetPath(path string) bool {
 		strings.HasPrefix(p, "/login") || strings.HasPrefix(p, "/setup") ||
 		strings.HasPrefix(p, "/settings") || strings.HasPrefix(p, "/api/") ||
 		strings.HasPrefix(p, "/trpc") || strings.HasPrefix(p, "/favicon") ||
+		strings.HasPrefix(p, "/manifest") || strings.HasPrefix(p, "/icon-") ||
+		strings.HasPrefix(p, "/apple-touch-icon") || strings.HasPrefix(p, "/robots") ||
 		strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") ||
 		strings.HasSuffix(p, ".png") || strings.HasSuffix(p, ".svg") ||
 		strings.HasSuffix(p, ".ico") || strings.HasSuffix(p, ".json") ||
 		strings.HasSuffix(p, ".woff") || strings.HasSuffix(p, ".woff2") ||
-		strings.HasSuffix(p, ".ttf") {
+		strings.HasSuffix(p, ".ttf") || strings.HasSuffix(p, ".webmanifest") ||
+		strings.HasSuffix(p, ".xml") || strings.HasSuffix(p, ".txt") ||
+		strings.HasSuffix(p, ".map") || strings.HasSuffix(p, ".jpg") ||
+		strings.HasSuffix(p, ".jpeg") || strings.HasSuffix(p, ".gif") ||
+		strings.HasSuffix(p, ".webp") {
 		return true
 	}
 	return false

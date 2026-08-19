@@ -191,7 +191,8 @@ func (m *Manager) imageAllowed(ref string) bool {
 		strings.Contains(clean, "9router") ||
 		strings.Contains(clean, "freellmapi") ||
 		strings.Contains(clean, "litellm") ||
-		strings.Contains(clean, "coai") {
+		strings.Contains(clean, "coai") ||
+		strings.Contains(clean, "chatnio") {
 		return true
 	}
 	return m.allowed[ref] || m.allowed[shortRef(ref)] || m.allowed[clean]
@@ -252,9 +253,13 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 	if err != nil {
 		return fmt.Errorf("unknown adapter %q: %w", r.AdapterType, err)
 	}
-	// Auto-heal legacy or invalid image names for freellmapi:
+	// Auto-heal legacy or invalid image names for freellmapi & coai:
 	if r.AdapterType == "freellmapi" && (r.ImageRef == "" || r.ImageRef == "tashfeenahmed/freellmapi:latest" || r.ImageRef == "tashfeenahmed/freellmapi") {
 		r.ImageRef = "ghcr.io/tashfeenahmed/freellmapi:latest"
+		_ = m.store.UpdateRouterImage(ctx, r.ID, r.ImageRef)
+	}
+	if (r.AdapterType == "coai" || r.ProviderType == "coai") && (r.ImageRef == "" || r.ImageRef == "coaidev/coai:latest" || r.ImageRef == "coaidev/coai") {
+		r.ImageRef = "programzmh/chatnio:latest"
 		_ = m.store.UpdateRouterImage(ctx, r.ID, r.ImageRef)
 	}
 

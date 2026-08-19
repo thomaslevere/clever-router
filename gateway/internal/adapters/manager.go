@@ -368,11 +368,16 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 	lim := ad.ResourceLimits(&localForStart)
 	pidsLimit := lim.PidsLimit
 
+	containerUser := "0:0"
+	if r.AdapterType == "llmgateway" {
+		containerUser = ""
+	}
+
 	name = containerPrefix + r.Slug
 	internalPort := nat.Port(fmt.Sprintf("%d/tcp", ad.InternalPort(&localForStart)))
 	cfg := &container.Config{
 		Image: r.ImageRef,
-		User:  "0:0", // <-- CRITICAL: Run as root inside container so UID 1000 has zero permission issues with SQLite/files
+		User:  containerUser,
 		Env:   ad.Env(&localForStart, creds),
 		ExposedPorts: nat.PortSet{
 			internalPort: struct{}{},

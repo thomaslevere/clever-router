@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -216,6 +217,8 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 	}
 	copyHeaders(req.Header, c.Request.Header)
 	req.Host = ""
+	// Request uncompressed identity from local container to allow fast, transparent stream/HTML processing
+	req.Header.Set("Accept-Encoding", "identity")
 
 	// Inject Reverse Proxy Namespace Headers so downstream instances know their public mount point
 	req.Header.Set("X-Forwarded-Prefix", prefix)
@@ -270,6 +273,7 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 			}
 			copyHeaders(altReq.Header, c.Request.Header)
 			altReq.Header.Set("X-Forwarded-Prefix", prefix)
+			altReq.Header.Set("Accept-Encoding", "identity")
 			altReq.Host = ""
 			if altResp, err := p.client.Do(altReq); err == nil {
 				if altResp.StatusCode != http.StatusNotFound {
@@ -311,7 +315,18 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 	// HTML Content: Transform Next.js routing metadata, asset paths, and inject <base> guard
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
 	if strings.Contains(contentType, "text/html") {
-		rawHTML, err := io.ReadAll(resp.Body)
+		// Strip Content-Encoding since we are transforming and writing uncompressed HTML
+		c.Writer.Header().Del("Content-Encoding")
+
+		var bodyReader io.Reader = resp.Body
+		if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+			if gzReader, err := gzip.NewReader(resp.Body); err == nil {
+				defer gzReader.Close()
+				bodyReader = gzReader
+			}
+		}
+
+		rawHTML, err := io.ReadAll(bodyReader)
 		if err == nil {
 			modifiedHTML := p.transformHTML(rawHTML, prefix, targetSlug)
 			c.Writer.Header().Set("Content-Length", strconv.Itoa(len(modifiedHTML)))

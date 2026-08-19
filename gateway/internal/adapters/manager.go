@@ -53,6 +53,7 @@ type Manager struct {
 	watchersMu  sync.Mutex
 	watchers    map[string][]*storage.VolumeWatcher
 	routerLocks sync.Map
+	imageLocks  sync.Map
 	onEventMu   sync.RWMutex
 	onEvent     func(routerID string, eventType string, payload map[string]any)
 }
@@ -1008,6 +1009,11 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 // ----- internals -----
 
 func (m *Manager) ensureImage(ctx context.Context, r *store.Router, ref string) error {
+	val, _ := m.imageLocks.LoadOrStore(ref, &sync.Mutex{})
+	mu := val.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
 	// 1. Fast path: check if image is already present in the local Docker daemon
 	if _, _, err := m.docker.ImageInspectWithRaw(ctx, ref); err == nil {
 		log.Printf("[manager] image %s already cached locally; skipping pull", ref)

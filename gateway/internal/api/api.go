@@ -838,12 +838,18 @@ func (a *API) discoverRouter(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
 	}
-	go func() {
-		if err := a.manager.DiscoverModels(context.Background(), r, nil, ""); err != nil {
-			log.Printf("[api] discover %s: %v", r.Slug, err)
-		}
-	}()
-	c.JSON(202, gin.H{"ok": true})
+	if err := a.manager.DiscoverModels(c.Request.Context(), r, nil, ""); err != nil {
+		log.Printf("[api] discover %s: %v", r.Slug, err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	models, _ := a.store.ListModels(c.Request.Context(), r.ID)
+	c.JSON(200, gin.H{
+		"ok":              true,
+		"models_count":    len(models),
+		"providers_count": r.ProvidersCount,
+		"models":          models,
+	})
 }
 
 func (a *API) getInitialPassword(c *gin.Context) {

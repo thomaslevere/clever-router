@@ -739,8 +739,6 @@ func (m *Manager) Logs(ctx context.Context, r *store.Router, follow bool) (io.Re
 }
 
 // DiscoverModels calls the router's models endpoint and upserts the model list.
-// BUG-1 FIX: now calls ad.ModelsPath(r) — not HealthPath — so adapters with a
-// dedicated health endpoint (e.g. /health) that differs from /v1/models work correctly.
 func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapter, addr string) error {
 	if ad == nil {
 		a, err := m.reg.Get(r.AdapterType)
@@ -752,15 +750,77 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 	if addr == "" {
 		addr = r.TargetAddr
 	}
-	url := strings.TrimRight(addr, "/") + ad.ModelsPath(r)
-	body, err := httpGet(ctx, url, 10*time.Second)
-	if err != nil {
-		return err
+
+	// Dynamic IP resolution fallback if addr is empty or container moved
+	if addr == "" && r.ContainerID != "" {
+		if working, ok := m.checkAnyWorking(ctx, r.ContainerID, ad.InternalPort(r), ad.ModelsPath(r)); ok {
+			addr = working
+		}
 	}
+	if addr == "" {
+		return fmt.Errorf("router target address is empty or not yet reachable")
+	}
+
+	// Collect potential auth tokens
+	var authTokens []string
+	decryptedEnv := m.decryptRouterEnv(r)
+	for _, ev := range decryptedEnv {
+		if strings.Contains(ev.Key, "KEY") || strings.Contains(ev.Key, "TOKEN") || strings.Contains(ev.Key, "SECRET") {
+			val := strings.TrimSpace(ev.Value)
+			if val != "" {
+				authTokens = append(authTokens, val)
+			}
+		}
+	}
+	creds, _ := m.loadCreds(ctx, r)
+	for _, k := range creds {
+		val := strings.TrimSpace(k)
+		if val != "" {
+			authTokens = append(authTokens, val)
+		}
+	}
+
+	candidatePaths := []string{ad.ModelsPath(r), "/v1/models", "/models"}
+	var body []byte
+	var lastErr error
+
+	for _, p := range candidatePaths {
+		if p == "" {
+			continue
+		}
+		url := strings.TrimRight(addr, "/") + p
+
+		// 1. Try with discovered auth tokens
+		for _, token := range authTokens {
+			b, err := httpGetWithAuth(ctx, url, token, 8*time.Second)
+			if err == nil && len(b) > 0 {
+				body = b
+				break
+			}
+			lastErr = err
+		}
+		if len(body) > 0 {
+			break
+		}
+
+		// 2. Try unauthenticated
+		b, err := httpGet(ctx, url, 8*time.Second)
+		if err == nil && len(b) > 0 {
+			body = b
+			break
+		}
+		lastErr = err
+	}
+
+	if len(body) == 0 {
+		return fmt.Errorf("failed to fetch models from %s: %v", addr, lastErr)
+	}
+
 	models, err := ad.ParseModels(r, body)
 	if err != nil {
-		return err
+		return fmt.Errorf("parse models: %w", err)
 	}
+
 	if err := m.store.UpsertModels(ctx, r.ID, models); err != nil {
 		return err
 	}
@@ -773,6 +833,7 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 		"providers_count": providers,
 		"slug":            r.Slug,
 	})
+	_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
 	return nil
 }
 
@@ -1257,11 +1318,18 @@ func hostOnly(addr string) string {
 }
 
 func httpGet(ctx context.Context, url string, timeout time.Duration) ([]byte, error) {
+	return httpGetWithAuth(ctx, url, "", timeout)
+}
+
+func httpGetWithAuth(ctx context.Context, url string, token string, timeout time.Duration) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

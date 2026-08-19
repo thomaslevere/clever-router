@@ -112,8 +112,8 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 		}
 	}
 
-	// 1. Fallback routing for root-relative assets and web pages (e.g. /login, /dashboard, /_next/*, /assets/*, /favicon.ico, /manifest.webmanifest).
-	if !ok && isWebOrAssetPath(c.Request.URL.Path) {
+	// 1. Fallback routing for root-relative requests (e.g. /home, /providers, /login, /dashboard, /_next/*, /assets/*, etc.)
+	if !ok {
 		fallbackSlug, fallbackTarget := p.findFallbackRouter(c)
 		if fallbackTarget != "" {
 			targetSlug = fallbackSlug
@@ -696,11 +696,17 @@ func isWebOrAssetPath(path string) bool {
 	p := strings.ToLower(path)
 	if strings.HasPrefix(p, "/_next") || strings.HasPrefix(p, "/static") ||
 		strings.HasPrefix(p, "/assets") || strings.HasPrefix(p, "/dashboard") ||
+		strings.HasPrefix(p, "/home") || strings.HasPrefix(p, "/providers") ||
+		strings.HasPrefix(p, "/models") || strings.HasPrefix(p, "/usage") ||
+		strings.HasPrefix(p, "/keys") || strings.HasPrefix(p, "/audit") ||
+		strings.HasPrefix(p, "/logs") || strings.HasPrefix(p, "/playground") ||
+		strings.HasPrefix(p, "/chaos") || strings.HasPrefix(p, "/evals") ||
+		strings.HasPrefix(p, "/settings") || strings.HasPrefix(p, "/account") ||
 		strings.HasPrefix(p, "/login") || strings.HasPrefix(p, "/setup") ||
-		strings.HasPrefix(p, "/settings") || strings.HasPrefix(p, "/api/") ||
-		strings.HasPrefix(p, "/trpc") || strings.HasPrefix(p, "/favicon") ||
-		strings.HasPrefix(p, "/manifest") || strings.HasPrefix(p, "/icon-") ||
-		strings.HasPrefix(p, "/apple-touch-icon") || strings.HasPrefix(p, "/robots") ||
+		strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/trpc") ||
+		strings.HasPrefix(p, "/favicon") || strings.HasPrefix(p, "/manifest") ||
+		strings.HasPrefix(p, "/icon-") || strings.HasPrefix(p, "/apple-touch-icon") ||
+		strings.HasPrefix(p, "/robots") ||
 		strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") ||
 		strings.HasSuffix(p, ".png") || strings.HasSuffix(p, ".svg") ||
 		strings.HasSuffix(p, ".ico") || strings.HasSuffix(p, ".json") ||

@@ -162,6 +162,14 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 				return
 			}
 		}
+		if c.Request.URL.Path == "/workspace" || c.Request.URL.Path == "/workspace/" {
+			dest := "/workspace/logs"
+			if c.Request.URL.RawQuery != "" {
+				dest += "?" + c.Request.URL.RawQuery
+			}
+			c.Redirect(http.StatusFound, dest)
+			return
+		}
 	}
 
 	// 2. Direct Web UI Activation & Redirection (for single-domain mode)
@@ -177,11 +185,11 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 			return
 		}
 
-		if cleanPath == "open" || cleanPath == "dashboard" || cleanPath == "login" || cleanPath == "" {
+		if cleanPath == "open" || cleanPath == "dashboard" || cleanPath == "login" || cleanPath == "workspace" || cleanPath == "" {
 			c.SetCookie("cr_active_router", targetSlug, 86400*7, "/", "", false, false)
 			dest := "/dashboard"
 			if strings.Contains(low, "bifrost") {
-				dest = "/overview"
+				dest = "/workspace/logs"
 			} else if strings.Contains(low, "litellm") {
 				dest = fmt.Sprintf("/%s/ui/", targetSlug)
 			} else if strings.Contains(low, "freellm") {
@@ -203,6 +211,20 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 			c.Redirect(http.StatusFound, dest)
 			return
 		}
+	}
+
+	// 3. Clean status response for /:slug/v1 root
+	if strings.Trim(upstreamPath, "/") == "v1" && c.Request.Method == "GET" {
+		c.JSON(http.StatusOK, gin.H{
+			"service": "CleverRoute AI Proxy",
+			"router":  targetSlug,
+			"status":  "ready",
+			"endpoints": gin.H{
+				"models":           fmt.Sprintf("/%s/v1/models", targetSlug),
+				"chat_completions": fmt.Sprintf("/%s/v1/chat/completions", targetSlug),
+			},
+		})
+		return
 	}
 
 	token := p.extractToken(c)

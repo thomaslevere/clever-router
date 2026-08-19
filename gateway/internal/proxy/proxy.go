@@ -92,9 +92,27 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 	target, ok := p.table.Lookup(slug)
 	targetSlug := slug
 	upstreamPath := path
+	isRootProxy := false
 
-	// Fallback routing for root-relative assets and sub-requests (e.g. /_next/*, /assets/*, /static/*, /favicon.ico).
-	// Only activate for known asset/sub-request paths — never for arbitrary unknown slugs.
+	// 0. Subdomain / Host-header routing (e.g. omnirouter.yourdomain.com -> router: omnirouter)
+	host := c.Request.Host
+	if i := strings.Index(host, ":"); i > 0 {
+		host = host[:i]
+	}
+	if hostParts := strings.Split(host, "."); len(hostParts) > 2 {
+		subdomain := strings.ToLower(hostParts[0])
+		if subdomain != "admin" && subdomain != "api" && subdomain != "app" && !strings.HasPrefix(subdomain, "app-") {
+			if t, found := p.table.Lookup(subdomain); found {
+				targetSlug = subdomain
+				target = t
+				upstreamPath = c.Request.URL.Path
+				ok = true
+				isRootProxy = true
+			}
+		}
+	}
+
+	// 1. Fallback routing for root-relative assets and web pages (e.g. /login, /dashboard, /_next/*, /assets/*, /favicon.ico, /manifest.webmanifest).
 	if !ok && isWebOrAssetPath(c.Request.URL.Path) {
 		fallbackSlug, fallbackTarget := p.findFallbackRouter(c)
 		if fallbackTarget != "" {
@@ -102,6 +120,7 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 			target = fallbackTarget
 			upstreamPath = c.Request.URL.Path
 			ok = true
+			isRootProxy = true
 		}
 	}
 
@@ -110,9 +129,31 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 		return
 	}
 
+	// 2. Direct Web UI Activation & Redirection (for single-domain mode)
+	// When user visits /:slug/open, /:slug/dashboard, or /:slug/login directly in browser:
+	// Set the active router cookie and redirect to root /dashboard or /login for 100% native Next.js App Router execution.
+	if !isRootProxy && c.Request.Method == "GET" && !strings.HasPrefix(upstreamPath, "/v1") && !strings.HasPrefix(upstreamPath, "/api") {
+		cleanPath := strings.Trim(upstreamPath, "/")
+		if cleanPath == "open" || cleanPath == "dashboard" || cleanPath == "login" || cleanPath == "" {
+			c.SetCookie("cr_active_router", targetSlug, 86400*7, "/", "", false, false)
+			dest := "/dashboard"
+			if cleanPath == "login" {
+				dest = "/login"
+			}
+			if c.Request.URL.RawQuery != "" {
+				dest += "?" + c.Request.URL.RawQuery
+			}
+			c.Redirect(http.StatusFound, dest)
+			return
+		}
+	}
+
 	token := p.extractToken(c)
 
 	prefix := "/" + targetSlug
+	if isRootProxy {
+		prefix = ""
+	}
 
 	// Trailing slash normalization for root slug path
 	if (path == "" || path == "/") && targetSlug == slug && c.Request.Method == "GET" {

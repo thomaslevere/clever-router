@@ -6,9 +6,10 @@ import type { Router } from "../lib/types";
 
 const adapters = [
   { value: "omniroute", label: "OmniRoute", image: "diegosouzapw/omniroute:latest" },
+  { value: "new-api", label: "New-API (QuantumNous)", image: "calciumion/new-api:latest" },
+  { value: "litellm", label: "LiteLLM", image: "ghcr.io/berriai/litellm:main-stable" },
   { value: "9router", label: "9Router", image: "decolua/9router:latest" },
   { value: "freellmapi", label: "FreeLLMAPI", image: "ghcr.io/tashfeenahmed/freellmapi:latest" },
-  { value: "litellm", label: "LiteLLM", image: "ghcr.io/berriai/litellm:main-stable" },
   { value: "custom", label: "Custom Gateway", image: "" },
 ];
 
@@ -38,8 +39,8 @@ export default function AddRouterModal({
       ...f,
       adapter_type: v,
       image_ref: a.image || f.image_ref,
-      slug: f.slug === "" || ["omniroute", "9router", "freellmapi", "litellm"].includes(f.slug) ? v : f.slug,
-      endpoint_path: f.endpoint_path === "" || ["/omniroute", "/9router", "/freellmapi", "/litellm", "/omniroute/v1", "/9router/v1", "/freellmapi/v1", "/litellm/v1"].includes(f.endpoint_path) ? `/${v}` : f.endpoint_path,
+      slug: f.slug === "" || ["omniroute", "new-api", "9router", "freellmapi", "litellm"].includes(f.slug) ? v : f.slug,
+      endpoint_path: f.endpoint_path === "" || ["/omniroute", "/new-api", "/9router", "/freellmapi", "/litellm", "/omniroute/v1", "/new-api/v1", "/9router/v1", "/freellmapi/v1", "/litellm/v1"].includes(f.endpoint_path) ? `/${v}` : f.endpoint_path,
     }));
   }
 

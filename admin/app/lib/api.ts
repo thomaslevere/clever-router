@@ -122,7 +122,9 @@ export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: strin
   const base = window.location.origin;
 
   let targetPath = `/${slug}/open`;
-  if (router.adapter_type === "coai" || slug.toLowerCase().includes("coai")) {
+  if (router.adapter_type === "llmgateway" || slug.toLowerCase().includes("llmgateway")) {
+    targetPath = `/${slug}/open`;
+  } else if (router.adapter_type === "coai" || slug.toLowerCase().includes("coai")) {
     targetPath = `/${slug}/open`;
   } else if (router.adapter_type === "bifrost" || slug.toLowerCase().includes("bifrost")) {
     targetPath = `/${slug}/open`;

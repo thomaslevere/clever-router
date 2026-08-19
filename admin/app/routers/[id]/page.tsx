@@ -191,20 +191,25 @@ export default function RouterDetailPage() {
               )}
             </div>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 font-mono">
-              <code className="text-brand font-medium">{r.endpoint_path}/v1/…</code> · {r.adapter_type} ·{" "}
+              <code className="text-brand font-medium">
+                {r.endpoint_path.endsWith("/v1") ? r.endpoint_path : `${r.endpoint_path}/v1`}/…
+              </code> · {r.adapter_type} ·{" "}
               {r.image_ref}
             </p>
             <div className="mt-2 flex flex-col gap-1 text-xs text-slate-500 dark:text-slate-400">
               <div className="flex items-center gap-2 flex-wrap pt-0.5">
                 <span className="font-medium text-slate-600 dark:text-slate-300">OpenAI Base URL:</span>
                 <code className="bg-brand/10 dark:bg-brand/20 border border-brand/20 dark:border-brand/30 px-2 py-0.5 rounded text-brand font-mono font-semibold text-xs">
-                  {typeof window !== "undefined" ? `${window.location.origin}${r.endpoint_path}/v1` : `${r.endpoint_path}/v1`}
+                  {typeof window !== "undefined"
+                    ? `${window.location.origin}${r.endpoint_path.endsWith("/v1") ? r.endpoint_path : `${r.endpoint_path}/v1`}`
+                    : `${r.endpoint_path.endsWith("/v1") ? r.endpoint_path : `${r.endpoint_path}/v1`}`}
                 </code>
                 <button
                   type="button"
                   className="text-[11px] px-2 py-0.5 rounded border border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5 text-slate-600 dark:text-slate-400 font-mono transition"
                   onClick={() => {
-                    const base = typeof window !== "undefined" ? `${window.location.origin}${r.endpoint_path}/v1` : `${r.endpoint_path}/v1`;
+                    const cleanPath = r.endpoint_path.endsWith("/v1") ? r.endpoint_path : `${r.endpoint_path}/v1`;
+                    const base = typeof window !== "undefined" ? `${window.location.origin}${cleanPath}` : cleanPath;
                     navigator.clipboard.writeText(base);
                     setCopiedBaseUrl(true);
                     setTimeout(() => setCopiedBaseUrl(false), 2000);
@@ -221,7 +226,7 @@ export default function RouterDetailPage() {
               {(panelUrl || realtime.nativePanelUrl) && (
                 <div className="flex items-center gap-2 flex-wrap pt-1">
                   <span className="font-medium text-slate-600 dark:text-slate-300">Native Dashboard:</span>
-                  {isRunning && realtime.healthStatus === "healthy" ? (
+                  {isRunning || currentRuntime === "running" ? (
                     <>
                       <a
                         className="text-brand hover:underline font-semibold font-mono text-xs inline-flex items-center gap-1.5 bg-brand/10 dark:bg-brand/20 text-brand px-2.5 py-1 rounded-md transition hover:bg-brand/20 dark:hover:bg-brand/30"
@@ -261,11 +266,11 @@ export default function RouterDetailPage() {
             {/* Start Button */}
             <button
               className="btn-primary text-xs shadow-sm flex items-center gap-1.5 transition-all"
-              disabled={isRunning || isStarting || isStopping || isWiping}
+              disabled={isRunning || isStopping || isWiping || realtime.busyAction === "start"}
               onClick={realtime.handleStart}
             >
-              {isStarting && <span className="inline-block animate-spin text-xs">⏳</span>}
-              <span>{isStarting ? "Starting…" : "▶ Start"}</span>
+              {realtime.busyAction === "start" && <span className="inline-block animate-spin text-xs">⏳</span>}
+              <span>{realtime.busyAction === "start" ? "Starting…" : "▶ Start"}</span>
             </button>
 
             {/* Restart Button */}
@@ -278,14 +283,14 @@ export default function RouterDetailPage() {
               <span>{realtime.busyAction === "restart" ? "Restarting…" : "🔄 Restart"}</span>
             </button>
 
-            {/* Stop Button */}
+            {/* Stop / Cancel Button */}
             <button
               className="btn-danger text-xs flex items-center gap-1.5 transition-all"
-              disabled={isStopped || isStarting || isStopping || isWiping}
+              disabled={(isStopped && !isStarting) || isStopping || isWiping}
               onClick={realtime.handleStop}
             >
               {isStopping && <span className="inline-block animate-spin text-xs">⏳</span>}
-              <span>{isStopping ? "Stopping…" : "⏹ Stop"}</span>
+              <span>{isStarting ? "⏹ Cancel Startup" : isStopping ? "Stopping…" : "⏹ Stop"}</span>
             </button>
 
             {/* Discover Models Button */}
@@ -310,8 +315,25 @@ export default function RouterDetailPage() {
         </div>
       </div>
 
+      {/* Failure State Alert Banner */}
+      {currentRuntime === "failed" && (
+        <div className="card p-4 shadow-sm border bg-red-500/10 dark:bg-red-500/15 border-red-500/30 text-red-600 dark:text-red-400">
+          <div className="flex items-center gap-3">
+            <div className="text-2xl">⚠️</div>
+            <div>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-red-700 dark:text-red-300">
+                Container Startup Failed
+              </h4>
+              <p className="text-xs mt-0.5 text-red-600 dark:text-red-400">
+                The container could not be started. Check the Docker daemon and system logs below for exact details, or click <strong>▶ Start</strong> to retry.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Native Dashboard Credentials & Factory Reset Banner */}
-      {r.adapter_type === "omniroute" && (
+      {(initialPassword || r.adapter_type === "omniroute" || r.adapter_type === "9router" || r.adapter_type === "freellmapi") && (
         <div className={`card p-4 shadow-sm border ${
           initialPassword
             ? "bg-amber-500/5 dark:bg-amber-500/10 border-amber-500/20"
@@ -328,11 +350,13 @@ export default function RouterDetailPage() {
                 <div className={`text-xs font-bold uppercase tracking-wider ${
                   initialPassword ? "text-amber-900 dark:text-amber-200" : "text-brand font-semibold"
                 }`}>
-                  {initialPassword ? "Native Dashboard Login Credentials" : "Initial Setup Wizard Ready"}
+                  {r.adapter_type === "freellmapi"
+                    ? "FreeLLMAPI Setup Code / Encryption Key"
+                    : (initialPassword ? "Native Dashboard Login Credentials" : "Initial Setup Wizard Ready")}
                 </div>
                 {initialPassword ? (
                   <div className="flex items-center gap-2 mt-0.5 text-xs text-slate-600 dark:text-slate-300 flex-wrap">
-                    <span>Initial Admin Password:</span>
+                    <span>{r.adapter_type === "freellmapi" ? "Setup Code / Encryption Key:" : "Initial Admin Password:"}</span>
                     <code className="px-2 py-0.5 rounded bg-black/5 dark:bg-white/10 font-mono font-bold text-amber-600 dark:text-amber-400 text-xs border border-amber-500/30 select-all">
                       {initialPassword}
                     </code>
@@ -356,16 +380,17 @@ export default function RouterDetailPage() {
                   className="btn-secondary text-xs flex items-center gap-1.5 py-1.5 px-3"
                 >
                   <span>{copiedPass ? "✓" : "📋"}</span>
-                  <span>{copiedPass ? "Copied!" : "Copy Password"}</span>
+                  <span>{copiedPass ? "Copied" : "Copy Password"}</span>
                 </button>
-              ) : (
+              ) : null}
+              {panelUrl && (
                 <a
-                  href={panelUrl || getRouterPanelUrl(r)}
+                  href={panelUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="btn-primary text-xs flex items-center gap-1.5 py-1.5 px-3 shadow-sm"
+                  className="btn-primary text-xs flex items-center gap-1.5 py-1.5 px-3"
                 >
-                  <span>Open Setup Wizard ↗</span>
+                  <span>Open Panel ↗</span>
                 </a>
               )}
 
@@ -378,6 +403,43 @@ export default function RouterDetailPage() {
               >
                 <span>{isWiping ? "🔄" : "🧹"}</span>
                 <span>{isWiping ? "Wiping..." : "Wipe & Fresh Reset"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Headless API Gateway Card for FreeLLMAPI */}
+      {r.adapter_type === "freellmapi" && (
+        <div className="card p-4 shadow-sm border bg-brand/5 dark:bg-brand/10 border-brand/20">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="grid h-9 w-9 place-items-center rounded-xl text-lg bg-brand/10 text-brand">
+                ⚡
+              </div>
+              <div>
+                <div className="text-xs font-bold uppercase tracking-wider text-brand">
+                  Headless OpenAI API Bridge Active
+                </div>
+                <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
+                  FreeLLMAPI is a headless aggregator (pure OpenAI-compatible REST backend without a web GUI). Point your AI chat apps and OpenAI SDKs directly to the Base URL.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const cleanPath = r.endpoint_path.endsWith("/v1") ? r.endpoint_path : `${r.endpoint_path}/v1`;
+                  const curlCmd = `curl ${typeof window !== "undefined" ? window.location.origin : ""}${cleanPath}/models`;
+                  navigator.clipboard.writeText(curlCmd);
+                  setCopiedBaseUrl(true);
+                  setTimeout(() => setCopiedBaseUrl(false), 2000);
+                }}
+                className="btn-secondary text-xs flex items-center gap-1.5 py-1.5 px-3 font-mono"
+              >
+                <span>📋</span>
+                <span>Copy Test curl</span>
               </button>
             </div>
           </div>

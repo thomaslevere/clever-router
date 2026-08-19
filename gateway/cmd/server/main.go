@@ -79,8 +79,8 @@ func main() {
 		log.Println("S3 FastVolumeBridge disabled (no Cellar/S3 credentials configured; using local disk volumes)")
 	}
 
-	// Adapter registry
-	reg := adapters.NewRegistry(adapters.OmniRouteAdapter{})
+	// Adapter registry (OmniRoute + 9Router + FreeLLMAPI)
+	reg := adapters.NewRegistry(adapters.OmniRouteAdapter{}, adapters.NineRouterAdapter{}, adapters.FreeLLMAPIAdapter{})
 
 	// Hot routing table, seeded from Redis
 	table := router.NewTable(c)
@@ -168,7 +168,7 @@ func main() {
 	// 2. Stop running router containers and flush their volumes to S3
 	shutdownFlushCtx, flushCancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer flushCancel()
-	mgr.StopAll(shutdownFlushCtx)
+	mgr.StopAllForShutdown(shutdownFlushCtx)
 
 	// 3. Final S3 flush of all router namespaces & logs
 	if bridge != nil {

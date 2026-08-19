@@ -101,8 +101,19 @@ func New(d Deps) *API {
 			modelsCount, _ := payload["models_count"].(int)
 			providersCount, _ := payload["providers_count"].(int)
 
+			// Normalize "log" event type to "log_chunk" for frontend compatibility,
+			// and extract the "data" payload field into LogMessage.
+			wsEventType := eventType
+			logMessage := ""
+			if eventType == "log" {
+				wsEventType = "log_chunk"
+				if data, ok := payload["data"].(string); ok {
+					logMessage = data
+				}
+			}
+
 			routerHub.Broadcast(routerID, RouterEvent{
-				Type:           eventType,
+				Type:           wsEventType,
 				RouterID:       routerID,
 				Status:         status,
 				DesiredState:   desiredState,
@@ -110,6 +121,7 @@ func New(d Deps) *API {
 				HealthStatus:   healthStatus,
 				TargetAddr:     targetAddr,
 				NativePanelURL: nativePanelURL,
+				LogMessage:     logMessage,
 				ModelsCount:    modelsCount,
 				ProvidersCount: providersCount,
 				Payload:        payload,
@@ -171,7 +183,10 @@ func (a *API) Register(r *gin.Engine) {
 	a.registerAdmin(rest.Group("/"))
 	a.rest = rest
 
-	// Namespaced AI proxy: /{slug}/v1/... and /{slug}/{native}/...
+	// Namespaced proxy: /:slug/* serves BOTH the OpenAI-compatible API and the
+	// native router dashboard/UI. No /app/ prefix — everything is under /:slug.
+	// Example: /omnirouter/v1/chat/completions (API)
+	// Example: /omnirouter/dashboard           (native UI)
 	p := proxy.New(a.table, keys.NewAuth(a.store, a.cache), a.store, a.cache, a.cfg)
 	r.Any("/:slug", p.Handle)
 	r.Any("/:slug/*path", p.Handle)
@@ -226,6 +241,7 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 
 	// Router environment variables
 	g.GET("/routers/:id/env", a.getRouterEnv)
+	g.GET("/routers/:id/env/:key/reveal", a.revealRouterEnvKey)
 	g.PUT("/routers/:id/env", a.putRouterEnv)
 	g.POST("/routers/:id/env/apply", a.applyRouterEnv)
 
@@ -357,10 +373,20 @@ func (a *API) adminUI(c *gin.Context) {
 
 func (a *API) findRouter(ctx context.Context, idOrSlug string) (*store.Router, error) {
 	r, err := a.store.GetRouter(ctx, idOrSlug)
-	if err == nil && r != nil {
-		return r, nil
+	if err != nil || r == nil {
+		r, err = a.store.GetRouterBySlug(ctx, idOrSlug)
 	}
-	return a.store.GetRouterBySlug(ctx, idOrSlug)
+	if err != nil || r == nil {
+		return nil, err
+	}
+	if target, ok := a.table.Lookup(r.Slug); ok && target != "" {
+		r.TargetAddr = target
+		r.RuntimeState = "running"
+		if r.HealthStatus == "unknown" || r.HealthStatus == "stopped" {
+			r.HealthStatus = "healthy"
+		}
+	}
+	return r, nil
 }
 
 func maskRouterSecrets(r *store.Router) store.Router {
@@ -384,10 +410,12 @@ func maskRouterSecrets(r *store.Router) store.Router {
 type createRouterReq struct {
 	Slug                   string              `json:"slug" binding:"required"`
 	Name                   string              `json:"name" binding:"required"`
-	AdapterType            string              `json:"adapter_type" binding:"required"`
-	ImageRef               string              `json:"image_ref" binding:"required"`
+	AdapterType            string              `json:"adapter_type"`
+	ProviderType           string              `json:"provider_type"`
+	ImageRef               string              `json:"image_ref"`
 	DesiredVersion         string              `json:"desired_version"`
 	EndpointPath           string              `json:"endpoint_path"`
+	RoutePath              string              `json:"route_path"`
 	DesiredState           string              `json:"desired_state"`
 	Config                 store.Map           `json:"config"`
 	EnvVars                []store.EnvVariable `json:"env_vars"`
@@ -402,6 +430,13 @@ func (a *API) listRouters(c *gin.Context) {
 	}
 	out := make([]store.Router, len(rs))
 	for i, r := range rs {
+		if target, ok := a.table.Lookup(r.Slug); ok && target != "" {
+			r.TargetAddr = target
+			r.RuntimeState = "running"
+			if r.HealthStatus == "unknown" || r.HealthStatus == "stopped" {
+				r.HealthStatus = "healthy"
+			}
+		}
 		out[i] = maskRouterSecrets(&r)
 	}
 	c.JSON(200, out)
@@ -414,15 +449,49 @@ func (a *API) createRouter(c *gin.Context) {
 		return
 	}
 
+	// Normalize adapter/provider type and endpoint/route path
+	adapterType := req.AdapterType
+	if adapterType == "" {
+		adapterType = req.ProviderType
+	}
+	if adapterType == "" {
+		adapterType = "omniroute"
+	}
+
+	endpointPath := req.EndpointPath
+	if endpointPath == "" {
+		endpointPath = req.RoutePath
+	}
+	if endpointPath == "" {
+		endpointPath = "/" + req.Slug
+	}
+	if !strings.HasPrefix(endpointPath, "/") {
+		endpointPath = "/" + endpointPath
+	}
+	// Strip trailing /v1 to avoid double nesting like /freellmapi/v1/v1
+	endpointPath = strings.TrimSuffix(strings.TrimRight(endpointPath, "/"), "/v1")
+	if endpointPath == "" {
+		endpointPath = "/" + req.Slug
+	}
+
+	imageRef := req.ImageRef
+	if imageRef == "" {
+		switch adapterType {
+		case "9router":
+			imageRef = "decolua/9router:latest"
+		case "freellmapi":
+			imageRef = "ghcr.io/tashfeenahmed/freellmapi:latest"
+		default:
+			imageRef = "diegosouzapw/omniroute:latest"
+		}
+	}
+
 	// GAP-3 FIX: validate slug before writing to DB or passing to Docker.
 	if err := validateSlug(req.Slug); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	if req.EndpointPath == "" {
-		req.EndpointPath = "/" + req.Slug
-	}
 	if req.DesiredVersion == "" {
 		req.DesiredVersion = "latest"
 	}
@@ -461,9 +530,9 @@ func (a *API) createRouter(c *gin.Context) {
 	}
 
 	r := &store.Router{
-		Slug: req.Slug, Name: req.Name, AdapterType: req.AdapterType, ImageRef: req.ImageRef,
-		DesiredVersion: req.DesiredVersion, EndpointPath: req.EndpointPath,
-		DesiredState: req.DesiredState, Config: req.Config,
+		Slug: req.Slug, Name: req.Name, AdapterType: adapterType, ProviderType: adapterType,
+		ImageRef: imageRef, DesiredVersion: req.DesiredVersion, EndpointPath: endpointPath,
+		RoutePath: endpointPath, DesiredState: req.DesiredState, Config: req.Config,
 		EnvVars: cleanedEnv, AutoRestartOnEnvChange: req.AutoRestartOnEnvChange,
 	}
 	if err := a.store.CreateRouter(c, r); err != nil {
@@ -537,6 +606,36 @@ func (a *API) getRouterEnv(c *gin.Context) {
 		"env_vars":                  masked.EnvVars,
 		"auto_restart_on_env_change": r.AutoRestartOnEnvChange,
 	})
+}
+
+func (a *API) revealRouterEnvKey(c *gin.Context) {
+	r, err := a.findRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	targetKey := strings.TrimSpace(c.Param("key"))
+	for _, ev := range r.EnvVars {
+		if strings.EqualFold(strings.TrimSpace(ev.Key), targetKey) {
+			val := ev.Value
+			if ev.IsSecret && secrets.IsEncrypted(val) {
+				if dec, err := secrets.DecryptValue(a.box, val); err == nil {
+					val = dec
+				}
+			}
+			// OmniRoute fallback default if empty
+			if val == "" && strings.EqualFold(ev.Key, "INITIAL_PASSWORD") && r.AdapterType == "omniroute" {
+				val = "CHANGEME"
+			}
+			a.audit(c, "router.env.reveal", "router", r.ID, nil, store.Map{"key": targetKey, "slug": r.Slug})
+			c.JSON(200, gin.H{
+				"key":   ev.Key,
+				"value": val,
+			})
+			return
+		}
+	}
+	c.JSON(404, gin.H{"error": "key not found"})
 }
 
 type putRouterEnvReq struct {
@@ -678,14 +777,20 @@ func (a *API) startRouter(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
 	}
-	_ = a.store.SetDesiredState(c, r.ID, "running")
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	_ = a.store.SetDesiredState(context.Background(), r.ID, "running")
+	go func(target store.Router) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("[api] panic starting %s: %v", target.Slug, rec)
+				_ = a.store.UpdateRouterState(context.Background(), target.ID, "failed", "", "", "", "unhealthy")
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 		defer cancel()
-		if err := a.manager.Start(ctx, r); err != nil {
-			log.Printf("[api] start %s: %v", r.Slug, err)
+		if err := a.manager.Start(ctx, &target); err != nil {
+			log.Printf("[api] start %s: %v", target.Slug, err)
 		}
-	}()
+	}(*r)
 	a.audit(c, "router.start", "router", r.ID, nil, nil)
 	c.JSON(202, gin.H{"ok": true, "state": "starting"})
 }
@@ -745,17 +850,31 @@ func (a *API) getInitialPassword(c *gin.Context) {
 	}
 
 	password := ""
+	encryptionKey := ""
+	setupCode := ""
+
 	for _, ev := range r.EnvVars {
-		if strings.TrimSpace(ev.Key) == "INITIAL_PASSWORD" {
-			val := ev.Value
-			if ev.IsSecret && secrets.IsEncrypted(val) {
-				if dec, err := secrets.DecryptValue(a.box, val); err == nil {
-					password = dec
-				}
-			} else {
-				password = val
+		key := strings.TrimSpace(ev.Key)
+		val := ev.Value
+		if ev.IsSecret && secrets.IsEncrypted(val) {
+			if dec, err := secrets.DecryptValue(a.box, val); err == nil {
+				val = dec
 			}
-			break
+		}
+		if key == "INITIAL_PASSWORD" {
+			password = val
+		} else if key == "ENCRYPTION_KEY" {
+			encryptionKey = val
+		} else if key == "SETUP_CODE" || key == "SETUP_KEY" {
+			setupCode = val
+		}
+	}
+
+	if password == "" {
+		if encryptionKey != "" {
+			password = encryptionKey
+		} else if setupCode != "" {
+			password = setupCode
 		}
 	}
 
@@ -769,6 +888,8 @@ func (a *API) getInitialPassword(c *gin.Context) {
 
 	c.JSON(200, gin.H{
 		"initial_password": password,
+		"encryption_key":   encryptionKey,
+		"setup_code":       setupCode,
 		"is_default":       isDefault,
 		"adapter_type":     r.AdapterType,
 	})

@@ -103,6 +103,58 @@ export default function EnvironmentVariablesCard({
     setTimeout(() => setStatusMsg(null), 3000);
   };
 
+  // Load baseline preset for 9Router
+  const load9RouterPreset = () => {
+    isDirty.current = true;
+    const preset: EnvVariable[] = [
+      { key: "DATA_DIR", value: "/app/data", is_secret: false },
+      { key: "PORT", value: "20128", is_secret: false },
+      { key: "NODE_ENV", value: "production", is_secret: false },
+      { key: "HOSTNAME", value: "0.0.0.0", is_secret: false },
+      { key: "UV_THREADPOOL_SIZE", value: "12", is_secret: false },
+      { key: "NODE_OPTIONS", value: "--max-old-space-size=4096", is_secret: false },
+      { key: "GOMAXPROCS", value: "12", is_secret: false },
+      { key: "WEB_CONCURRENCY", value: "auto", is_secret: false },
+    ];
+
+    const currentKeys = new Set(envs.map((e) => e.key.trim().toUpperCase()));
+    const merged = [...envs];
+    for (const p of preset) {
+      if (!currentKeys.has(p.key)) {
+        merged.push(p);
+      }
+    }
+    setEnvs(merged);
+    setStatusMsg({ type: "success", text: "9Router preset variables added to list." });
+    setTimeout(() => setStatusMsg(null), 3000);
+  };
+
+  // Load baseline preset for FreeLLMAPI
+  const loadFreeLLMAPIPreset = () => {
+    isDirty.current = true;
+    const preset: EnvVariable[] = [
+      { key: "PORT", value: "3001", is_secret: false },
+      { key: "DATA_DIR", value: "/app/data", is_secret: false },
+      { key: "HOST_BIND", value: "0.0.0.0", is_secret: false },
+      { key: "NODE_ENV", value: "production", is_secret: false },
+      { key: "UV_THREADPOOL_SIZE", value: "12", is_secret: false },
+      { key: "NODE_OPTIONS", value: "--max-old-space-size=4096", is_secret: false },
+      { key: "GOMAXPROCS", value: "12", is_secret: false },
+      { key: "WEB_CONCURRENCY", value: "auto", is_secret: false },
+    ];
+
+    const currentKeys = new Set(envs.map((e) => e.key.trim().toUpperCase()));
+    const merged = [...envs];
+    for (const p of preset) {
+      if (!currentKeys.has(p.key)) {
+        merged.push(p);
+      }
+    }
+    setEnvs(merged);
+    setStatusMsg({ type: "success", text: "FreeLLMAPI preset variables added to list." });
+    setTimeout(() => setStatusMsg(null), 3000);
+  };
+
   // Convert raw .env text to structured array
   const parseRawEnv = (text: string) => {
     isDirty.current = true;
@@ -208,8 +260,26 @@ export default function EnvironmentVariablesCard({
     }
   };
 
+  const toggleRevealSecret = async (index: number) => {
+    const env = envs[index];
+    const willShow = !showSecrets[index];
+    if (willShow && env.is_secret && (env.value === "********" || env.value === "")) {
+      try {
+        const res = await api.get<{ key: string; value: string }>(
+          `/routers/${routerId}/env/${encodeURIComponent(env.key)}/reveal`
+        );
+        if (res && res.value !== undefined) {
+          updateField(index, "value", res.value);
+        }
+      } catch (e: any) {
+        setStatusMsg({ type: "error", text: `Failed to reveal ${env.key}: ${e.message}` });
+      }
+    }
+    setShowSecrets((prev) => ({ ...prev, [index]: willShow }));
+  };
+
   return (
-    <div className="card shadow-md p-6 border border-black/10 dark:border-white/10">
+    <div className="card shadow-md p-6 border border-black/10 dark:border-white/10 mt-6">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-black/10 dark:border-white/10">
         <div>
@@ -237,6 +307,30 @@ export default function EnvironmentVariablesCard({
             >
               <span>⚡</span>
               <span>OmniRoute Preset</span>
+            </button>
+          )}
+
+          {adapterType === "9router" && (
+            <button
+              type="button"
+              onClick={load9RouterPreset}
+              className="btn-ghost text-xs px-2.5 py-1.5 flex items-center gap-1.5 hover:border-emerald-500/40 text-emerald-600 dark:text-emerald-400"
+              title="Load high-performance 9Router multi-core presets"
+            >
+              <span>⚡</span>
+              <span>9Router Preset</span>
+            </button>
+          )}
+
+          {adapterType === "freellmapi" && (
+            <button
+              type="button"
+              onClick={loadFreeLLMAPIPreset}
+              className="btn-ghost text-xs px-2.5 py-1.5 flex items-center gap-1.5 hover:border-emerald-500/40 text-emerald-600 dark:text-emerald-400"
+              title="Load FreeLLMAPI multi-core presets"
+            >
+              <span>⚡</span>
+              <span>FreeLLMAPI Preset</span>
             </button>
           )}
 
@@ -299,6 +393,15 @@ export default function EnvironmentVariablesCard({
                   ⚡ Load OmniRoute Preset
                 </button>
               )}
+              {adapterType === "9router" && (
+                <button
+                  type="button"
+                  onClick={load9RouterPreset}
+                  className="btn-primary text-xs px-3 py-1 font-semibold bg-emerald-600 hover:bg-emerald-500"
+                >
+                  ⚡ Load 9Router Preset
+                </button>
+              )}
             </div>
           </div>
         ) : (
@@ -340,9 +443,7 @@ export default function EnvironmentVariablesCard({
                     {env.is_secret && (
                       <button
                         type="button"
-                        onClick={() =>
-                          setShowSecrets((prev) => ({ ...prev, [index]: !prev[index] }))
-                        }
+                        onClick={() => toggleRevealSecret(index)}
                         className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xs px-1"
                         title={showSecrets[index] ? "Mask secret" : "Reveal secret"}
                       >

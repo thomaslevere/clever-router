@@ -51,6 +51,9 @@ RUN ln -sf /usr/bin/tini /sbin/tini
 # Install official Node 20.x runtime directly into /usr/local
 RUN curl -fsSL https://nodejs.org/dist/v20.18.0/node-v20.18.0-linux-x64.tar.xz | tar -xJ -C /usr/local --strip-components=1
 
+# Install 9Router globally
+RUN npm install -g 9router || true
+
 # Install official Docker CLI binary directly into /usr/local/bin
 RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-24.0.7.tgz | tar -xz -C /usr/local/bin --strip-components=1 docker/docker
 

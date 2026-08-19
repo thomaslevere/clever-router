@@ -6,6 +6,8 @@ import type { Router } from "../lib/types";
 
 const adapters = [
   { value: "omniroute", label: "OmniRoute", image: "diegosouzapw/omniroute:latest" },
+  { value: "9router", label: "9Router", image: "decolua/9router:latest" },
+  { value: "freellmapi", label: "FreeLLMAPI", image: "ghcr.io/tashfeenahmed/freellmapi:latest" },
   { value: "litellm", label: "LiteLLM", image: "ghcr.io/berriai/litellm:main-stable" },
   { value: "custom", label: "Custom Gateway", image: "" },
 ];
@@ -21,6 +23,7 @@ export default function AddRouterModal({
     slug: "",
     name: "",
     adapter_type: "omniroute",
+    endpoint_path: "",
     image_ref: adapters[0].image,
     desired_state: "stopped",
   });
@@ -31,7 +34,13 @@ export default function AddRouterModal({
 
   function pickAdapter(v: string) {
     const a = adapters.find((x) => x.value === v)!;
-    setForm((f) => ({ ...f, adapter_type: v, image_ref: a.image || f.image_ref }));
+    setForm((f) => ({
+      ...f,
+      adapter_type: v,
+      image_ref: a.image || f.image_ref,
+      slug: f.slug === "" || ["omniroute", "9router", "freellmapi", "litellm"].includes(f.slug) ? v : f.slug,
+      endpoint_path: f.endpoint_path === "" || ["/omniroute", "/9router", "/freellmapi", "/litellm", "/omniroute/v1", "/9router/v1", "/freellmapi/v1", "/litellm/v1"].includes(f.endpoint_path) ? `/${v}` : f.endpoint_path,
+    }));
   }
 
   async function submit(e: React.FormEvent) {
@@ -50,6 +59,9 @@ export default function AddRouterModal({
         slug: form.slug,
         name: form.name || form.slug,
         adapter_type: form.adapter_type,
+        provider_type: form.adapter_type,
+        endpoint_path: form.endpoint_path || "/" + form.slug,
+        route_path: form.endpoint_path || "/" + form.slug,
         image_ref: form.image_ref,
         desired_state: form.desired_state,
         env_vars,
@@ -89,14 +101,35 @@ export default function AddRouterModal({
               id="new-router-slug"
               className="input"
               required
-              placeholder="e.g. omniroute-prod"
+              placeholder="e.g. 9router or omniroute-prod"
               value={form.slug}
-              onChange={(e) =>
-                setForm((f) => ({ ...f, slug: e.target.value.toLowerCase() }))
-              }
+              onChange={(e) => {
+                const s = e.target.value.toLowerCase();
+                setForm((f) => ({
+                  ...f,
+                  slug: s,
+                  endpoint_path: f.endpoint_path === "" || f.endpoint_path === "/" + f.slug ? (s ? "/" + s : "") : f.endpoint_path,
+                }));
+              }}
             />
             <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-              Exposed namespaced endpoint at: <code className="text-brand">/{form.slug || "{slug}"}/v1/…</code>
+              Identifier for internal routing and Docker container naming.
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300 uppercase tracking-wider mb-1">
+              External Route Path
+            </label>
+            <input
+              id="new-router-endpoint-path"
+              className="input font-mono text-xs"
+              placeholder="e.g. /9router or /9router/v1"
+              value={form.endpoint_path || (form.slug ? "/" + form.slug : "")}
+              onChange={(e) => setForm((f) => ({ ...f, endpoint_path: e.target.value }))}
+            />
+            <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
+              Exposed gateway API path: <code className="text-brand">{form.endpoint_path || (form.slug ? "/" + form.slug : "/{slug}")}/v1/…</code>
             </p>
           </div>
 
@@ -107,7 +140,7 @@ export default function AddRouterModal({
             <input
               id="new-router-name"
               className="input"
-              placeholder="e.g. OmniRoute Production Gateway"
+              placeholder="e.g. 9Router Production Aggregator"
               value={form.name}
               onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
             />
@@ -165,6 +198,38 @@ export default function AddRouterModal({
               Must match the server allowlist (<code className="text-slate-400">ALLOWED_IMAGES</code>).
             </p>
           </div>
+
+          {form.adapter_type === "9router" && (
+            <div className="space-y-3 rounded-lg bg-emerald-500/5 dark:bg-emerald-500/10 p-3.5 border border-emerald-500/20">
+              <div className="flex items-center gap-2 font-semibold text-emerald-600 dark:text-emerald-400 text-xs">
+                <span>⚡</span>
+                <span>9Router High-Performance AI Gateway</span>
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                Optimized for high-throughput proxying with RTK token compression, 3-tier fallback routing (Subscription → Cheap → Free), and OpenAI-compatible endpoints.
+              </p>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
+                <span>Multi-core acceleration:</span>
+                <span className="font-mono text-emerald-600 dark:text-emerald-400 font-bold">12 vCPUs / 8 GB</span>
+              </div>
+            </div>
+          )}
+
+          {form.adapter_type === "freellmapi" && (
+            <div className="space-y-2 rounded-lg bg-emerald-500/5 dark:bg-emerald-500/10 p-3.5 border border-emerald-500/20">
+              <div className="flex items-center gap-2 font-semibold text-emerald-600 dark:text-emerald-400 text-xs">
+                <span>🌐</span>
+                <span>FreeLLMAPI AI Aggregator Engine</span>
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                Aggregates free-tier AI providers (HuggingFace, Groq, Cohere, Cloudflare, etc.) with automatic rate-limit tracking, failover routing, and AES-256 encrypted credential storage.
+              </p>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
+                <span>Multi-core acceleration:</span>
+                <span className="font-mono text-emerald-600 dark:text-emerald-400 font-bold">12 vCPUs / 8 GB</span>
+              </div>
+            </div>
+          )}
 
           {form.adapter_type === "omniroute" && (
             <div className="space-y-3 rounded-lg bg-brand/5 dark:bg-brand/10 p-3.5 border border-brand/20">

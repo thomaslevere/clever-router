@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -39,10 +40,16 @@ func New(t *router.Table, a *keys.Auth, st *store.Store, c *cache.Cache, cfg *co
 		table: t, auth: a, store: st, cache: c, cfg: cfg,
 		client: &http.Client{
 			Timeout: 0, // streaming must not be cut by an overall timeout
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				// Prevent http.Client from automatically following redirects so we can rewrite Location headers to the browser
+				return http.ErrUseLastResponse
+			},
 			Transport: &http.Transport{
-				DialContext:     (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-				MaxIdleConns:    100,
-				IdleConnTimeout: 90 * time.Second,
+				DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				MaxIdleConns:        2048,
+				MaxIdleConnsPerHost: 512,
+				MaxConnsPerHost:     1024,
+				IdleConnTimeout:     90 * time.Second,
 			},
 		},
 	}
@@ -58,15 +65,54 @@ type proxyError struct {
 	Error  string `json:"error"`
 }
 
+// Handle serves both OpenAI-compatible APIs and native router dashboards under /:slug/*path.
+// Example: /omnirouter/v1/chat/completions (API)
+// Example: /omnirouter/dashboard           (native UI)
 func (p *Proxy) Handle(c *gin.Context) {
+	slug := c.Param("slug")
+
+	// Root path or empty slug: return clean service info instead of 502.
+	if slug == "" {
+		c.JSON(200, gin.H{
+			"service": "CleverRoute",
+			"status":  "ok",
+			"admin":   "/admin",
+			"docs":    "Use /:slug/v1/* to access router APIs",
+		})
+		return
+	}
+
+	p.handleRequest(c)
+}
+
+func (p *Proxy) handleRequest(c *gin.Context) {
 	slug := c.Param("slug")
 	path := c.Param("path")
 
 	target, ok := p.table.Lookup(slug)
 	targetSlug := slug
 	upstreamPath := path
+	isRootProxy := false
 
-	// Fallback routing for root-relative assets and sub-requests (e.g. /_next/*, /api/*, /favicon.ico)
+	// 0. Subdomain / Host-header routing (e.g. omnirouter.yourdomain.com -> router: omnirouter)
+	host := c.Request.Host
+	if i := strings.Index(host, ":"); i > 0 {
+		host = host[:i]
+	}
+	if hostParts := strings.Split(host, "."); len(hostParts) > 2 {
+		subdomain := strings.ToLower(hostParts[0])
+		if subdomain != "admin" && subdomain != "api" && subdomain != "app" && !strings.HasPrefix(subdomain, "app-") {
+			if t, found := p.table.Lookup(subdomain); found {
+				targetSlug = subdomain
+				target = t
+				upstreamPath = c.Request.URL.Path
+				ok = true
+				isRootProxy = true
+			}
+		}
+	}
+
+	// 1. Fallback routing for root-relative requests (e.g. /home, /providers, /login, /dashboard, /_next/*, /assets/*, etc.)
 	if !ok {
 		fallbackSlug, fallbackTarget := p.findFallbackRouter(c)
 		if fallbackTarget != "" {
@@ -74,6 +120,7 @@ func (p *Proxy) Handle(c *gin.Context) {
 			target = fallbackTarget
 			upstreamPath = c.Request.URL.Path
 			ok = true
+			isRootProxy = true
 		}
 	}
 
@@ -82,16 +129,42 @@ func (p *Proxy) Handle(c *gin.Context) {
 		return
 	}
 
+	// 2. Direct Web UI Activation & Redirection (for single-domain mode)
+	// When user visits /:slug/open, /:slug/dashboard, or /:slug/login directly in browser:
+	// Set the active router cookie and redirect to root /dashboard or /login for 100% native Next.js App Router execution.
+	if !isRootProxy && c.Request.Method == "GET" && !strings.HasPrefix(upstreamPath, "/v1") && !strings.HasPrefix(upstreamPath, "/api") {
+		cleanPath := strings.Trim(upstreamPath, "/")
+		if cleanPath == "open" || cleanPath == "dashboard" || cleanPath == "login" || cleanPath == "" {
+			c.SetCookie("cr_active_router", targetSlug, 86400*7, "/", "", false, false)
+			dest := "/dashboard"
+			if cleanPath == "login" {
+				dest = "/login"
+			}
+			if c.Request.URL.RawQuery != "" {
+				dest += "?" + c.Request.URL.RawQuery
+			}
+			c.Redirect(http.StatusFound, dest)
+			return
+		}
+	}
+
 	token := p.extractToken(c)
 
-	// If root of the router is accessed without subpath (e.g. /omniroute-live or /omniroute-live/)
-	if (path == "" || path == "/") && targetSlug == slug {
-		redirectURL := "/" + targetSlug + "/dashboard"
-		if token != "" {
-			redirectURL += "?token=" + url.QueryEscape(token)
+	prefix := "/" + targetSlug
+	if isRootProxy {
+		prefix = ""
+	}
+
+	// Trailing slash normalization for root slug path
+	if (path == "" || path == "/") && targetSlug == slug && c.Request.Method == "GET" {
+		if !strings.HasSuffix(c.Request.URL.Path, "/") {
+			redirectURL := prefix + "/"
+			if c.Request.URL.RawQuery != "" {
+				redirectURL += "?" + c.Request.URL.RawQuery
+			}
+			c.Redirect(http.StatusMovedPermanently, redirectURL)
+			return
 		}
-		c.Redirect(http.StatusTemporaryRedirect, redirectURL)
-		return
 	}
 
 	isAdmin := false
@@ -142,9 +215,11 @@ func (p *Proxy) Handle(c *gin.Context) {
 		// preserved in the request and proxied directly to the upstream container.
 	}
 
-	// Set browser session cookies on valid token for subsequent Next.js asset/chunk requests
+	// Set browser session cookies on valid token for subsequent asset/chunk requests
 	if token != "" {
 		c.SetCookie("cr_router_auth", token, 86400*7, "/", "", false, false)
+	}
+	if targetSlug != "" {
 		c.SetCookie("cr_active_router", targetSlug, 86400*7, "/", "", false, false)
 	}
 
@@ -166,6 +241,11 @@ func (p *Proxy) Handle(c *gin.Context) {
 		}
 	}
 
+	// Ensure upstreamPath has leading slash
+	if !strings.HasPrefix(upstreamPath, "/") {
+		upstreamPath = "/" + upstreamPath
+	}
+
 	upURL := strings.TrimRight(target, "/") + upstreamPath
 	if c.Request.URL.RawQuery != "" {
 		upURL += "?" + c.Request.URL.RawQuery
@@ -177,6 +257,25 @@ func (p *Proxy) Handle(c *gin.Context) {
 	}
 	copyHeaders(req.Header, c.Request.Header)
 	req.Host = ""
+	// Request uncompressed identity from local container to allow fast, transparent stream/HTML processing
+	req.Header.Set("Accept-Encoding", "identity")
+
+	// Inject Reverse Proxy Namespace Headers so downstream instances know their public mount point
+	req.Header.Set("X-Forwarded-Prefix", prefix)
+	if proto := c.GetHeader("X-Forwarded-Proto"); proto != "" {
+		req.Header.Set("X-Forwarded-Proto", proto)
+	} else if c.Request.TLS != nil {
+		req.Header.Set("X-Forwarded-Proto", "https")
+	} else {
+		req.Header.Set("X-Forwarded-Proto", "http")
+	}
+	if host := c.Request.Host; host != "" {
+		req.Header.Set("X-Forwarded-Host", host)
+	}
+	if clientIP := c.ClientIP(); clientIP != "" {
+		req.Header.Set("X-Forwarded-For", clientIP)
+	}
+	req.Header.Set("X-Original-URI", c.Request.RequestURI)
 
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -186,8 +285,8 @@ func (p *Proxy) Handle(c *gin.Context) {
 
 	// Automatic API Path Mapping:
 	// If upstream returned 404 Not Found, automatically map between
-	// /v1/* <-> /api/v1/* or /v1 <-> /api/v1/models
-	if resp.StatusCode == http.StatusNotFound {
+	// /v1/* <-> /api/v1/*, /something/v1/* <-> /v1/*, and root variants
+	if resp.StatusCode == http.StatusNotFound && (strings.Contains(upstreamPath, "/v1") || strings.Contains(upstreamPath, "/api")) {
 		var altPaths []string
 		if strings.HasPrefix(upstreamPath, "/v1/") {
 			altPaths = append(altPaths, "/api"+upstreamPath)
@@ -197,6 +296,10 @@ func (p *Proxy) Handle(c *gin.Context) {
 			altPaths = append(altPaths, "/api/v1", "/v1/models", "/api/v1/models")
 		} else if upstreamPath == "/api/v1" || upstreamPath == "/api/v1/" {
 			altPaths = append(altPaths, "/v1", "/api/v1/models", "/v1/models")
+		} else if strings.HasSuffix(upstreamPath, "/v1/models") {
+			altPaths = append(altPaths, "/v1/models", "/api/v1/models")
+		} else if strings.HasSuffix(upstreamPath, "/models") {
+			altPaths = append(altPaths, "/v1/models", "/api/v1/models")
 		}
 
 		for _, altPath := range altPaths {
@@ -209,6 +312,8 @@ func (p *Proxy) Handle(c *gin.Context) {
 				continue
 			}
 			copyHeaders(altReq.Header, c.Request.Header)
+			altReq.Header.Set("X-Forwarded-Prefix", prefix)
+			altReq.Header.Set("Accept-Encoding", "identity")
 			altReq.Host = ""
 			if altResp, err := p.client.Do(altReq); err == nil {
 				if altResp.StatusCode != http.StatusNotFound {
@@ -222,9 +327,52 @@ func (p *Proxy) Handle(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
-	// Flush upstream headers to client.
+	sc := newUsageScanner(model)
+	flusher, _ := c.Writer.(http.Flusher)
+
+	// Detect HTML early so we can skip encoding-related headers during copy.
+	// When we transform HTML, the original Content-Length and Content-Encoding
+	// become stale. We must NOT forward them or edge proxies (Sozu/Clever Cloud)
+	// will create a mismatch between the declared and actual body encoding.
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	isHTML := strings.Contains(contentType, "text/html")
+
+	// Flush and rewrite upstream headers to client.
 	for k, vs := range resp.Header {
 		if isHop(k) {
+			continue
+		}
+		// For HTML responses we rewrite the body, so skip headers that describe
+		// the upstream body encoding — we'll write our own uncompressed body.
+		if isHTML {
+			kl := strings.ToLower(k)
+			if kl == "content-encoding" || kl == "content-length" || kl == "transfer-encoding" {
+				continue
+			}
+		}
+		// Location header rewriting for 30x redirects
+		if strings.EqualFold(k, "Location") {
+			for _, v := range vs {
+				rewrittenLoc := p.rewriteLocation(v, prefix)
+				c.Writer.Header().Add(k, rewrittenLoc)
+			}
+			continue
+		}
+		// Rewrite Link preload headers (e.g. </_next/static/media/font.woff2>; rel=preload)
+		// to include the subpath prefix so preloaded resources are found.
+		if isHTML && strings.EqualFold(k, "Link") {
+			for _, v := range vs {
+				// Rewrite root-relative paths inside angle brackets: </path> → </prefix/path>
+				rewritten := v
+				if strings.Contains(rewritten, "</") {
+					rewritten = strings.ReplaceAll(rewritten, "</_next/", fmt.Sprintf("<%s/_next/", prefix))
+					rewritten = strings.ReplaceAll(rewritten, "</static/", fmt.Sprintf("<%s/static/", prefix))
+					rewritten = strings.ReplaceAll(rewritten, "</assets/", fmt.Sprintf("<%s/assets/", prefix))
+					rewritten = strings.ReplaceAll(rewritten, "</favicon", fmt.Sprintf("<%s/favicon", prefix))
+					rewritten = strings.ReplaceAll(rewritten, "</manifest", fmt.Sprintf("<%s/manifest", prefix))
+				}
+				c.Writer.Header().Add(k, rewritten)
+			}
 			continue
 		}
 		for _, v := range vs {
@@ -235,12 +383,35 @@ func (p *Proxy) Handle(c *gin.Context) {
 	if model != "" {
 		c.Writer.Header().Set("X-CleverRoute-Model", model)
 	}
+
+	// HTML Content: Transform Next.js routing metadata, asset paths, and inject <base> guard
+	if isHTML {
+		var bodyReader io.Reader = resp.Body
+		if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+			if gzReader, err := gzip.NewReader(resp.Body); err == nil {
+				defer gzReader.Close()
+				bodyReader = gzReader
+			}
+		}
+
+		rawHTML, err := io.ReadAll(bodyReader)
+		if err == nil {
+			modifiedHTML := p.transformHTML(rawHTML, prefix, targetSlug)
+			// Do NOT set Content-Length here. Edge proxies (Sozu) may re-compress
+			// the response, which would invalidate any Content-Length we set.
+			// Let the HTTP stack use chunked transfer encoding instead.
+			c.Writer.WriteHeader(resp.StatusCode)
+			_, _ = c.Writer.Write(modifiedHTML)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
+	}
+
 	c.Writer.WriteHeader(resp.StatusCode)
 
-	sc := newUsageScanner(model)
-	flusher, _ := c.Writer.(http.Flusher)
-
-	if isStream && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "event-stream") {
+	if isStream && strings.Contains(contentType, "event-stream") {
 		// Streaming SSE: tee through the sniffer while copying to the client.
 		tee := io.TeeReader(resp.Body, sc)
 		buf := make([]byte, 16*1024)
@@ -272,6 +443,165 @@ func (p *Proxy) Handle(c *gin.Context) {
 		// Record usage asynchronously so the client is never blocked on the DB.
 		go p.recordUsage(ki.ID, targetSlug, model, resp.StatusCode, sc)
 	}
+}
+
+// rewriteLocation prepends the router prefix (e.g. /omniroute) to relative and internal absolute redirects
+func (p *Proxy) rewriteLocation(loc, prefix string) string {
+	if loc == "" || prefix == "" {
+		return loc
+	}
+
+	// 1. Root-relative redirect (e.g. /dashboard or /login or /setup)
+	if strings.HasPrefix(loc, "/") {
+		if strings.HasPrefix(loc, prefix+"/") || loc == prefix {
+			return loc
+		}
+		return prefix + loc
+	}
+
+	// 2. Internal absolute redirect (e.g. http://172.17.0.x:3001/dashboard or http://127.0.0.1:3001/dashboard)
+	if u, err := url.Parse(loc); err == nil && u.Path != "" {
+		if strings.HasPrefix(u.Path, prefix+"/") || u.Path == prefix {
+			return u.Path
+		}
+		newPath := prefix + u.Path
+		if u.RawQuery != "" {
+			newPath += "?" + u.RawQuery
+		}
+		return newPath
+	}
+
+	return loc
+}
+
+// transformHTML patches Next.js client routing metadata, rewrites absolute asset URLs, and injects <base> guard
+func (p *Proxy) transformHTML(raw []byte, prefix, slug string) []byte {
+	if len(raw) == 0 || prefix == "" {
+		return raw
+	}
+	htmlStr := string(raw)
+
+	// 1. Rewrite Next.js __NEXT_DATA__ JSON configuration to align client-side router
+	if strings.Contains(htmlStr, `id="__NEXT_DATA__"`) {
+		htmlStr = strings.ReplaceAll(htmlStr, `"basePath":""`, fmt.Sprintf(`"basePath":"%s"`, prefix))
+		htmlStr = strings.ReplaceAll(htmlStr, `"basePath": null`, fmt.Sprintf(`"basePath":"%s"`, prefix))
+		htmlStr = strings.ReplaceAll(htmlStr, `"basePath":null`, fmt.Sprintf(`"basePath":"%s"`, prefix))
+		htmlStr = strings.ReplaceAll(htmlStr, `"assetPrefix":""`, fmt.Sprintf(`"assetPrefix":"%s"`, prefix))
+		htmlStr = strings.ReplaceAll(htmlStr, `"assetPrefix": null`, fmt.Sprintf(`"assetPrefix":"%s"`, prefix))
+		htmlStr = strings.ReplaceAll(htmlStr, `"assetPrefix":null`, fmt.Sprintf(`"assetPrefix":"%s"`, prefix))
+	}
+
+	// 2. Rewrite root asset attributes in HTML so bundles and styles load under the subpath prefix
+	htmlStr = strings.ReplaceAll(htmlStr, `src="/_next/`, fmt.Sprintf(`src="%s/_next/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/_next/`, fmt.Sprintf(`href="%s/_next/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `src="/static/`, fmt.Sprintf(`src="%s/static/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/static/`, fmt.Sprintf(`href="%s/static/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `src="/assets/`, fmt.Sprintf(`src="%s/assets/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/assets/`, fmt.Sprintf(`href="%s/assets/`, prefix))
+
+	// Rewrite ALL Next.js App Router RSC chunk references and JS string literals (both unescaped and escaped JSON)
+	// Next.js 14 App Router embeds 100+ client component chunk paths in self.__next_f payloads as \"/_next/...\"
+	htmlStr = strings.ReplaceAll(htmlStr, `\"/_next/`, fmt.Sprintf(`\"%s/_next/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"/_next/`, fmt.Sprintf(`"%s/_next/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `'/_next/`, fmt.Sprintf(`'%s/_next/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"/static/`, fmt.Sprintf(`\"%s/static/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"/static/`, fmt.Sprintf(`"%s/static/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `'/_static/`, fmt.Sprintf(`'%s/static/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"/assets/`, fmt.Sprintf(`\"%s/assets/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"/assets/`, fmt.Sprintf(`"%s/assets/`, prefix))
+
+	// Rewrite common root-relative PWA/meta resources (manifest, icons, favicons, etc.)
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/manifest.webmanifest"`, fmt.Sprintf(`href="%s/manifest.webmanifest"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/manifest.json"`, fmt.Sprintf(`href="%s/manifest.json"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/favicon.ico"`, fmt.Sprintf(`href="%s/favicon.ico"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/favicon.svg"`, fmt.Sprintf(`href="%s/favicon.svg"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/icon-`, fmt.Sprintf(`href="%s/icon-`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `href="/apple-touch-icon`, fmt.Sprintf(`href="%s/apple-touch-icon`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `src="/favicon`, fmt.Sprintf(`src="%s/favicon`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `src="/icon-`, fmt.Sprintf(`src="%s/icon-`, prefix))
+
+	// RSC (React Server Components) JSON payload format (both unescaped and escaped JSON)
+	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/manifest.webmanifest"`, fmt.Sprintf(`"href":"%s/manifest.webmanifest"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/manifest.json"`, fmt.Sprintf(`"href":"%s/manifest.json"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/favicon.ico"`, fmt.Sprintf(`"href":"%s/favicon.ico"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/favicon.svg"`, fmt.Sprintf(`"href":"%s/favicon.svg"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/icon-`, fmt.Sprintf(`"href":"%s/icon-`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/apple-touch-icon`, fmt.Sprintf(`"href":"%s/apple-touch-icon`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"src":"/favicon`, fmt.Sprintf(`"src":"%s/favicon`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"src":"/icon-`, fmt.Sprintf(`"src":"%s/icon-`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/manifest.webmanifest\"`, fmt.Sprintf(`\"href\":\"%s/manifest.webmanifest\"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/manifest.json\"`, fmt.Sprintf(`\"href\":\"%s/manifest.json\"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/favicon.ico\"`, fmt.Sprintf(`\"href\":\"%s/favicon.ico\"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/favicon.svg\"`, fmt.Sprintf(`\"href\":\"%s/favicon.svg\"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/icon-`, fmt.Sprintf(`\"href\":\"%s/icon-`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/apple-touch-icon`, fmt.Sprintf(`\"href\":\"%s/apple-touch-icon`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"src\":\"/favicon`, fmt.Sprintf(`\"src\":\"%s/favicon`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"src\":\"/icon-`, fmt.Sprintf(`\"src\":\"%s/icon-`, prefix))
+
+	// 3. Inject client-side routing & fetch guard into <head>
+	clientGuardScript := fmt.Sprintf(`<script>
+window.__BASE_PATH__ = "%s";
+window.__ROUTER_SLUG__ = "%s";
+(function(){
+  try {
+    if (window.__NEXT_DATA__) {
+      window.__NEXT_DATA__.basePath = "%s";
+      window.__NEXT_DATA__.assetPrefix = "%s";
+    }
+  } catch(e){}
+  var p = "%s";
+  if (typeof history !== "undefined") {
+    var origPush = history.pushState;
+    var origReplace = history.replaceState;
+    history.pushState = function(state, title, url) {
+      if (typeof url === "string" && url.startsWith("/") && !url.startsWith(p)) {
+        url = p + url;
+      }
+      return origPush.apply(this, [state, title, url]);
+    };
+    history.replaceState = function(state, title, url) {
+      if (typeof url === "string" && url.startsWith("/") && !url.startsWith(p)) {
+        url = p + url;
+      }
+      return origReplace.apply(this, [state, title, url]);
+    };
+  }
+  if (typeof window.fetch !== "undefined") {
+    var origFetch = window.fetch;
+    window.fetch = function(input, init) {
+      if (typeof input === "string") {
+        if (input.startsWith("/") && !input.startsWith(p + "/") && !input.startsWith("/admin")) {
+          input = p + input;
+        }
+      } else if (input instanceof Request) {
+        try {
+          var u = new URL(input.url);
+          if (u.origin === window.location.origin && u.pathname.startsWith("/") && !u.pathname.startsWith(p + "/") && !u.pathname.startsWith("/admin")) {
+            input = new Request(p + u.pathname + u.search + u.hash, input);
+          }
+        } catch(e){}
+      }
+      return origFetch.apply(this, [input, init]);
+    };
+  }
+})();
+</script>`, prefix, slug, prefix, prefix, prefix)
+
+	// Inject into <head>
+	lowerHTML := strings.ToLower(htmlStr)
+	if idx := strings.Index(lowerHTML, "<head>"); idx != -1 {
+		pos := idx + len("<head>")
+		htmlStr = htmlStr[:pos] + clientGuardScript + htmlStr[pos:]
+	} else if idx := strings.Index(lowerHTML, "<head"); idx != -1 {
+		if endIdx := strings.IndexByte(htmlStr[idx:], '>'); endIdx != -1 {
+			pos := idx + endIdx + 1
+			htmlStr = htmlStr[:pos] + clientGuardScript + htmlStr[pos:]
+		}
+	} else {
+		htmlStr = clientGuardScript + htmlStr
+	}
+
+	return []byte(htmlStr)
 }
 
 func (p *Proxy) findFallbackRouter(c *gin.Context) (string, string) {
@@ -366,14 +696,26 @@ func isWebOrAssetPath(path string) bool {
 	p := strings.ToLower(path)
 	if strings.HasPrefix(p, "/_next") || strings.HasPrefix(p, "/static") ||
 		strings.HasPrefix(p, "/assets") || strings.HasPrefix(p, "/dashboard") ||
+		strings.HasPrefix(p, "/home") || strings.HasPrefix(p, "/providers") ||
+		strings.HasPrefix(p, "/models") || strings.HasPrefix(p, "/usage") ||
+		strings.HasPrefix(p, "/keys") || strings.HasPrefix(p, "/audit") ||
+		strings.HasPrefix(p, "/logs") || strings.HasPrefix(p, "/playground") ||
+		strings.HasPrefix(p, "/chaos") || strings.HasPrefix(p, "/evals") ||
+		strings.HasPrefix(p, "/settings") || strings.HasPrefix(p, "/account") ||
 		strings.HasPrefix(p, "/login") || strings.HasPrefix(p, "/setup") ||
-		strings.HasPrefix(p, "/settings") || strings.HasPrefix(p, "/api/") ||
-		strings.HasPrefix(p, "/trpc") || strings.HasPrefix(p, "/favicon") ||
+		strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/trpc") ||
+		strings.HasPrefix(p, "/favicon") || strings.HasPrefix(p, "/manifest") ||
+		strings.HasPrefix(p, "/icon-") || strings.HasPrefix(p, "/apple-touch-icon") ||
+		strings.HasPrefix(p, "/robots") ||
 		strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") ||
 		strings.HasSuffix(p, ".png") || strings.HasSuffix(p, ".svg") ||
 		strings.HasSuffix(p, ".ico") || strings.HasSuffix(p, ".json") ||
 		strings.HasSuffix(p, ".woff") || strings.HasSuffix(p, ".woff2") ||
-		strings.HasSuffix(p, ".ttf") {
+		strings.HasSuffix(p, ".ttf") || strings.HasSuffix(p, ".webmanifest") ||
+		strings.HasSuffix(p, ".xml") || strings.HasSuffix(p, ".txt") ||
+		strings.HasSuffix(p, ".map") || strings.HasSuffix(p, ".jpg") ||
+		strings.HasSuffix(p, ".jpeg") || strings.HasSuffix(p, ".gif") ||
+		strings.HasSuffix(p, ".webp") {
 		return true
 	}
 	return false
@@ -443,84 +785,57 @@ type usageScanner struct {
 }
 
 func newUsageScanner(model string) *usageScanner {
-	return &usageScanner{model: model}
+	return &usageScanner{model: model, buf: make([]byte, 0, 4096)}
 }
 
 func (s *usageScanner) Write(p []byte) (int, error) {
-	s.buf = append(s.buf, p...)
-	// Keep only the last 64KB to bound memory usage.
-	const maxBuf = 64 * 1024
-	if len(s.buf) > maxBuf {
-		s.buf = s.buf[len(s.buf)-maxBuf:]
+	if s.done {
+		return len(p), nil
 	}
-	if !s.done && bytes.Contains(s.buf, []byte("[DONE]")) {
-		s.done = true
+	// Buffer up to 64KB for usage parsing.
+	if len(s.buf) < 65536 {
+		s.buf = append(s.buf, p...)
 	}
 	return len(p), nil
 }
 
 func (s *usageScanner) usage() (prompt, completion, total int) {
-	s.parse()
+	if !s.parsed {
+		s.parse()
+	}
 	return s.prompt, s.comp, s.total
 }
 
 func (s *usageScanner) parse() {
-	if s.parsed {
-		return
-	}
 	s.parsed = true
-	obj := extractJSONObject(s.buf, []byte(`"usage":`))
-	if obj == nil {
+	body := s.buf
+	// Try OpenAI format first: {"usage":{"prompt_tokens":...,"completion_tokens":...,"total_tokens":...}}
+	var oai struct {
+		Model string `json:"model"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &oai); err == nil && oai.Usage.TotalTokens > 0 {
+		s.prompt = oai.Usage.PromptTokens
+		s.comp = oai.Usage.CompletionTokens
+		s.total = oai.Usage.TotalTokens
 		return
 	}
-	var u struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+	// Anthropic format: {"usage":{"input_tokens":...,"output_tokens":...}}
+	var ant struct {
+		Model string `json:"model"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 	}
-	if err := json.Unmarshal(obj, &u); err == nil {
-		s.prompt, s.comp, s.total = u.PromptTokens, u.CompletionTokens, u.TotalTokens
+	if err := json.Unmarshal(body, &ant); err == nil && (ant.Usage.InputTokens > 0 || ant.Usage.OutputTokens > 0) {
+		s.prompt = ant.Usage.InputTokens
+		s.comp = ant.Usage.OutputTokens
+		s.total = ant.Usage.InputTokens + ant.Usage.OutputTokens
+		return
 	}
-}
-
-// extractJSONObject locates the JSON object immediately following marker in buf.
-func extractJSONObject(buf, marker []byte) []byte {
-	idx := bytes.Index(buf, marker)
-	if idx < 0 {
-		return nil
-	}
-	rest := buf[idx+len(marker):]
-	start := bytes.IndexByte(rest, '{')
-	if start < 0 {
-		return nil
-	}
-	start += idx + len(marker)
-
-	depth := 0
-	inStr := false
-	escape := false
-
-	for i := start; i < len(buf); i++ {
-		b := buf[i]
-		switch {
-		case escape:
-			escape = false
-		case inStr:
-			if b == '\\' {
-				escape = true
-			} else if b == '"' {
-				inStr = false
-			}
-		case b == '"':
-			inStr = true
-		case b == '{':
-			depth++
-		case b == '}':
-			depth--
-			if depth == 0 {
-				return buf[start : i+1]
-			}
-		}
-	}
-	return nil
 }

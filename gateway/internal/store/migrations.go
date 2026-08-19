@@ -36,11 +36,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	sort.Strings(names)
 
 	for _, name := range names {
-		applied, err := s.Pool.Exec(ctx, `SELECT 1 FROM schema_migrations WHERE id=$1`, name)
-		if err != nil {
-			return err
-		}
-		if applied.RowsAffected() > 0 {
+		var exists int
+		err := s.Pool.QueryRow(ctx, `SELECT 1 FROM schema_migrations WHERE id=$1`, name).Scan(&exists)
+		if err == nil {
 			continue
 		}
 		data, err := migrationFS.ReadFile("migrations/" + name)

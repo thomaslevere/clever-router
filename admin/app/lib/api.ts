@@ -118,26 +118,10 @@ export const api = {
 export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: string; native_panel_url?: string }): string {
   if (typeof window === "undefined") return "";
   const token = getToken();
-  let path = router.native_panel_url || "";
-
-  if (path.startsWith("http://") || path.startsWith("https://")) {
-    try {
-      const u = new URL(path);
-      path = u.pathname;
-    } catch {
-      path = "/dashboard";
-    }
-  }
-
-  const endpoint = router.endpoint_path || `/${router.slug || ""}`;
-  if (!path || path === "/" || path === "/dashboard") {
-    path = `${endpoint}/dashboard`;
-  } else if (!path.startsWith(endpoint)) {
-    path = `${endpoint}${path.startsWith("/") ? path : `/${path}`}`;
-  }
+  const slug = router.slug || (router.endpoint_path ? router.endpoint_path.replace(/^\//, "") : "");
 
   const base = window.location.origin;
-  const url = new URL(path, base);
+  const url = new URL(`/${slug}/open`, base);
   if (token) {
     url.searchParams.set("token", token);
   }

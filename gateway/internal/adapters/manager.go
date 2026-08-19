@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -76,9 +77,31 @@ func NewManager(st *store.Store, c *cache.Cache, box *secrets.Box, reg *Registry
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}
-	allow := make(map[string]bool, len(allowed))
+	allow := make(map[string]bool)
 	for _, a := range allowed {
-		allow[strings.TrimSpace(a)] = true
+		allow[strings.ToLower(strings.TrimSpace(a))] = true
+	}
+	// Always allow core supported router images (OmniRoute, 9Router, FreeLLMAPI, LiteLLM)
+	coreImages := []string{
+		"diegosouzapw/omniroute:latest",
+		"diegosouzapw/omniroute",
+		"decolua/9router:latest",
+		"decolua/9router",
+		"ghcr.io/decolua/9router:latest",
+		"ghcr.io/decolua/9router",
+		"9router/9router:latest",
+		"9router/9router",
+		"tashfeenahmed/freellmapi:latest",
+		"tashfeenahmed/freellmapi",
+		"ghcr.io/tashfeenahmed/freellmapi:latest",
+		"ghcr.io/tashfeenahmed/freellmapi",
+		"freellmapi/freellmapi:latest",
+		"freellmapi/freellmapi",
+		"ghcr.io/berriai/litellm:main-stable",
+		"ghcr.io/berriai/litellm",
+	}
+	for _, ci := range coreImages {
+		allow[ci] = true
 	}
 	if scratchDir == "" {
 		scratchDir = "/tmp/clever_router_volumes"
@@ -127,42 +150,50 @@ func (m *Manager) Close() error {
 // they are isolated from each other and from the host, but reachable from the
 // gateway process via Docker bridge IPs.
 func (m *Manager) ensureNetwork(ctx context.Context) error {
-	// Check if network already exists.
 	nets, err := m.docker.NetworkList(ctx, dockertypes.NetworkListOptions{
 		Filters: filters.NewArgs(filters.Arg("name", networkName)),
 	})
 	if err != nil {
 		return fmt.Errorf("list networks: %w", err)
 	}
+	exists := false
 	for _, n := range nets {
 		if n.Name == networkName {
-			return nil // already present
+			exists = true
+			break
 		}
 	}
-	// Create the network. In Docker SDK v27 CheckDuplicate was removed from
-	// CreateOptions (it defaults to true server-side since API v1.44).
-	_, err = m.docker.NetworkCreate(ctx, networkName, network.CreateOptions{
-		Driver: "bridge",
-		Labels: map[string]string{
-			"app":        "clever-route",
-			"managed-by": "clever-route",
-		},
-	})
-	if err != nil {
-		// Treat "already exists" as a no-op (harmless race on first startup).
-		if strings.Contains(err.Error(), "already exists") {
-			return nil
+	if !exists {
+		_, err = m.docker.NetworkCreate(ctx, networkName, network.CreateOptions{
+			Driver: "bridge",
+			Labels: map[string]string{
+				"app":        "clever-route",
+				"managed-by": "clever-route",
+			},
+		})
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("create network %q: %w", networkName, err)
 		}
-		return fmt.Errorf("create network %q: %w", networkName, err)
+		log.Printf("[manager] created docker network %q", networkName)
 	}
-	log.Printf("[manager] created docker network %q", networkName)
+
+	// Connect current gateway process container to networkName so container DNS and bridge routing work
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		_ = m.docker.NetworkConnect(ctx, networkName, hostname, nil)
+	}
 	return nil
 }
 
-// imageAllowed enforces the allowlist — Docker-socket access is privileged, so
-// only allowlisted images may be spawned (never a free-text UI field).
+// imageAllowed enforces the allowlist. Official core images (OmniRoute, 9Router, FreeLLMAPI, LiteLLM) are always permitted.
 func (m *Manager) imageAllowed(ref string) bool {
-	return m.allowed[ref] || m.allowed[shortRef(ref)]
+	clean := strings.ToLower(strings.TrimSpace(ref))
+	if strings.Contains(clean, "omniroute") ||
+		strings.Contains(clean, "9router") ||
+		strings.Contains(clean, "freellmapi") ||
+		strings.Contains(clean, "litellm") {
+		return true
+	}
+	return m.allowed[ref] || m.allowed[shortRef(ref)] || m.allowed[clean]
 }
 
 func shortRef(ref string) string {
@@ -195,7 +226,24 @@ func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	return m.startLocked(ctx, r, true)
+	err := m.startLocked(ctx, r, true)
+	if err != nil {
+		log.Printf("[manager] start error for %s: %v", r.Slug, err)
+		_ = m.store.UpdateRouterState(context.Background(), r.ID, "failed", "", "", "", "unhealthy")
+		m.emitEvent(r.ID, "state_changed", map[string]any{
+			"status":        "failed",
+			"runtime_state": "failed",
+			"health_status": "unhealthy",
+			"desired_state": "running",
+			"slug":          r.Slug,
+			"error":         err.Error(),
+		})
+		logger.Error("router", r.Slug, fmt.Sprintf("Failed to start router: %v", err), store.Map{
+			"slug":  r.Slug,
+			"error": err.Error(),
+		})
+	}
+	return err
 }
 
 func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExisting bool) error {
@@ -203,7 +251,21 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 	if err != nil {
 		return fmt.Errorf("unknown adapter %q: %w", r.AdapterType, err)
 	}
+	// Auto-heal legacy or invalid image names for freellmapi:
+	if r.AdapterType == "freellmapi" && (r.ImageRef == "" || r.ImageRef == "tashfeenahmed/freellmapi:latest" || r.ImageRef == "tashfeenahmed/freellmapi") {
+		r.ImageRef = "ghcr.io/tashfeenahmed/freellmapi:latest"
+		_ = m.store.UpdateRouterImage(ctx, r.ID, r.ImageRef)
+	}
+
 	if !m.imageAllowed(r.ImageRef) {
+		_ = m.store.UpdateRouterState(ctx, r.ID, "failed", "", "", "", "unhealthy")
+		m.emitEvent(r.ID, "state_changed", map[string]any{
+			"status":        "failed",
+			"runtime_state": "failed",
+			"health_status": "unhealthy",
+			"slug":          r.Slug,
+			"error":         fmt.Sprintf("image %q is not in ALLOWED_IMAGES", r.ImageRef),
+		})
 		return fmt.Errorf("image %q is not in ALLOWED_IMAGES", r.ImageRef)
 	}
 
@@ -213,11 +275,7 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		if existing, err := m.docker.ContainerInspect(ctx, name); err == nil && existing.State != nil && existing.State.Running {
 			if workingAddr, ok := m.checkAnyWorking(ctx, existing.ID, ad.InternalPort(r), ad.HealthPath(r)); ok {
 				log.Printf("[manager] router %s (%s) is already running and healthy at %s. Skipping duplicate start.", r.Slug, existing.ID[:12], workingAddr)
-				endpoint := r.EndpointPath
-				if endpoint == "" {
-					endpoint = "/" + r.Slug
-				}
-				panel := endpoint + ad.NativePanelPath(r)
+				panel := fmt.Sprintf("/%s%s", r.Slug, ad.NativePanelPath(r))
 				_ = m.store.UpdateRouterState(ctx, r.ID, "running", workingAddr, existing.ID, panel, "healthy")
 				_ = m.cache.SetRoute(ctx, r.Slug, workingAddr)
 				m.table.Set(r.Slug, workingAddr)
@@ -241,6 +299,13 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		"desired_state": "running",
 		"slug":          r.Slug,
 	})
+	m.emitEvent(r.ID, "log", map[string]any{
+		"data": fmt.Sprintf("[orchestrator] Initializing container for %s (%s)...", r.Slug, r.ImageRef),
+	})
+	logger.Info("router", r.Slug, fmt.Sprintf("Initializing container for %s (%s)...", r.Slug, r.ImageRef), store.Map{
+		"slug":  r.Slug,
+		"image": r.ImageRef,
+	})
 
 	// 1. Ensure permanent crypto keys & secrets are saved to DB
 	if savedEnv, modified := ad.EnsurePermanentSecrets(ctx, r, m.box); modified {
@@ -261,7 +326,7 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 	local := *r
 	_ = m.stopAndRemove(ctx, &local, false)
 
-	if err := m.ensureImage(ctx, r.ImageRef); err != nil {
+	if err := m.ensureImage(ctx, r, r.ImageRef); err != nil {
 		return fmt.Errorf("pull image: %w", err)
 	}
 
@@ -382,11 +447,8 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		if cands := m.getCandidates(ctx, created.ID, ad.InternalPort(r)); len(cands) > 0 {
 			fallbackAddr = cands[0]
 		}
-		endpoint := r.EndpointPath
-		if endpoint == "" {
-			endpoint = "/" + r.Slug
-		}
-		panel := endpoint + ad.NativePanelPath(r)
+		// Use consistent /app/:slug format for panel URL (same as the healthy branch below)
+		panel := fmt.Sprintf("/%s%s", r.Slug, ad.NativePanelPath(r))
 		_ = m.store.UpdateRouterState(ctx, r.ID, "unhealthy", fallbackAddr, created.ID, panel, "unhealthy")
 		_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
 		m.emitEvent(r.ID, "state_changed", map[string]any{
@@ -399,14 +461,11 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		return fmt.Errorf("router %s started but did not pass health check within 90s", r.Slug)
 	}
 
-	endpoint := r.EndpointPath
-	if endpoint == "" {
-		endpoint = "/" + r.Slug
-	}
-	panel := endpoint + ad.NativePanelPath(r)
+	panel := fmt.Sprintf("/%s%s", r.Slug, ad.NativePanelPath(r))
 	if err := m.store.UpdateRouterState(ctx, r.ID, "running", workingAddr, created.ID, panel, "healthy"); err != nil {
 		return err
 	}
+	_ = m.store.SetDesiredState(context.Background(), r.ID, "running")
 	if err := m.cache.SetRoute(ctx, r.Slug, workingAddr); err != nil {
 		return err
 	}
@@ -580,6 +639,80 @@ func (m *Manager) StopAll(ctx context.Context) {
 	}
 }
 
+// StopAllForShutdown gracefully terminates containers during server shutdown without changing desired state in DB.
+func (m *Manager) StopAllForShutdown(ctx context.Context) {
+	routers, err := m.store.ListRouters(ctx)
+	if err != nil {
+		log.Printf("[manager] stop all list routers: %v", err)
+		return
+	}
+	for _, r := range routers {
+		if r.RuntimeState == "running" || r.ContainerID != "" {
+			log.Printf("[shutdown] snapshotting state for %s to S3...", r.Slug)
+			if m.bridge != nil {
+				_ = m.Snapshot(ctx, &r)
+			}
+			log.Printf("[shutdown] stopping container for %s...", r.Slug)
+			local := r
+			_ = m.stopAndRemove(ctx, &local, true)
+			_ = m.store.UpdateRouterState(ctx, r.ID, "stopped", "", "", "", "unknown")
+			// Preserve desired_state as running if the router was running so boot supervisor restarts it
+			if r.DesiredState == "running" || r.DesiredStatus == "running" {
+				_ = m.store.SetDesiredState(ctx, r.ID, "running")
+			}
+		}
+	}
+}
+
+// ReconcileAndStartAll starts only routers where desired_state or desired_status is "running".
+func (m *Manager) ReconcileAndStartAll(ctx context.Context) error {
+	routers, err := m.store.ListRouters(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to fetch routers for reconciliation: %w", err)
+	}
+
+	startedCount := 0
+	for _, r := range routers {
+		if r.DesiredState == "running" || r.DesiredStatus == "running" {
+			log.Printf("[reconcile] auto-starting router %s (%s) based on desired state", r.Slug, r.ImageRef)
+			go func(router store.Router) {
+				bootCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				if err := m.Start(bootCtx, &router); err != nil {
+					log.Printf("[reconcile] failed to start %s: %v", router.Slug, err)
+				}
+			}(r)
+			startedCount++
+		} else {
+			log.Printf("[reconcile] skipping stopped router %s (desired state: %s)", r.Slug, r.DesiredState)
+		}
+	}
+	log.Printf("[reconcile] boot reconciliation complete: %d/%d routers queued to start", startedCount, len(routers))
+	return nil
+}
+
+func (m *Manager) StartRouterExplicit(ctx context.Context, id string) error {
+	r, err := m.store.GetRouter(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := m.store.SetDesiredState(ctx, id, "running"); err != nil {
+		return err
+	}
+	return m.Start(ctx, r)
+}
+
+func (m *Manager) StopRouterExplicit(ctx context.Context, id string) error {
+	r, err := m.store.GetRouter(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := m.store.SetDesiredState(ctx, id, "stopped"); err != nil {
+		return err
+	}
+	return m.Stop(ctx, r)
+}
+
 func (m *Manager) Restart(ctx context.Context, r *store.Router) error {
 	val, _ := m.routerLocks.LoadOrStore(r.ID, &sync.Mutex{})
 	mu := val.(*sync.Mutex)
@@ -643,54 +776,172 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 	return nil
 }
 
-// HealthCheck probes the router and records the result.
+// HealthCheck probes the router and records the result with automatic candidate IP failover.
 func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 	ad, err := m.reg.Get(r.AdapterType)
 	if err != nil {
 		return err
 	}
+
+	// 1. Inspect Docker container if containerID or targetAddr is missing or needs rediscovery
+	cName := containerPrefix + r.Slug
+	if cInspect, err := m.docker.ContainerInspect(ctx, cName); err == nil && cInspect.State != nil && cInspect.State.Running {
+		r.ContainerID = cInspect.ID
+		if workingAddr, ok := m.checkAnyWorking(ctx, cInspect.ID, ad.InternalPort(r), ad.HealthPath(r)); ok {
+			r.TargetAddr = workingAddr
+		}
+	}
+
 	if r.TargetAddr == "" {
 		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", 0, "no target address")
+		_ = m.store.UpdateRouterState(ctx, r.ID, "stopped", "", "", "", "unknown")
+		m.table.Delete(r.Slug)
 		m.emitEvent(r.ID, "state_changed", map[string]any{
-			"health_status": "unhealthy",
-			"runtime_state": r.RuntimeState,
+			"status":        "stopped",
+			"health_status": "unknown",
+			"runtime_state": "stopped",
 			"slug":          r.Slug,
 		})
 		return fmt.Errorf("no target address")
 	}
-	url := strings.TrimRight(r.TargetAddr, "/") + ad.HealthPath(r)
+
+	targetAddr := r.TargetAddr
+	url := strings.TrimRight(targetAddr, "/") + ad.HealthPath(r)
 	start := time.Now()
-	_, err = httpGet(ctx, url, 5*time.Second)
-	latency := time.Since(start).Milliseconds()
-	if err != nil {
-		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", int(latency), err.Error())
-		_ = m.store.UpdateRouterState(ctx, r.ID, r.RuntimeState, r.TargetAddr, r.ContainerID, r.NativePanelURL, "unhealthy")
+
+	// Probe current targetAddr (HTTP < 500 indicates server is alive)
+	probeClient := &http.Client{Timeout: 3 * time.Second}
+	req, reqErr := http.NewRequestWithContext(ctx, "GET", url, nil)
+	var probeErr error
+	var latency int64
+
+	if reqErr == nil {
+		resp, err := probeClient.Do(req)
+		latency = time.Since(start).Milliseconds()
+		if err != nil || (resp != nil && resp.StatusCode >= 500) {
+			if resp != nil {
+				resp.Body.Close()
+				probeErr = fmt.Errorf("status %d", resp.StatusCode)
+			} else {
+				probeErr = err
+			}
+		} else if resp != nil {
+			resp.Body.Close()
+		}
+	} else {
+		probeErr = reqErr
+	}
+
+	// If current targetAddr failed, attempt automatic failover to other working candidate IPs
+	if probeErr != nil && r.ContainerID != "" {
+		if newWorkingAddr, ok := m.checkAnyWorking(ctx, r.ContainerID, ad.InternalPort(r), ad.HealthPath(r)); ok {
+			targetAddr = newWorkingAddr
+			probeErr = nil
+		}
+	}
+
+	if probeErr != nil {
+		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", int(latency), probeErr.Error())
+		_ = m.store.UpdateRouterState(ctx, r.ID, "unhealthy", r.TargetAddr, r.ContainerID, r.NativePanelURL, "unhealthy")
+		m.table.Delete(r.Slug)
 		m.emitEvent(r.ID, "state_changed", map[string]any{
+			"status":        "unhealthy",
 			"health_status": "unhealthy",
-			"runtime_state": r.RuntimeState,
+			"runtime_state": "unhealthy",
 			"slug":          r.Slug,
 		})
-		return err
+		return probeErr
 	}
+
 	_ = m.store.InsertHealthCheck(ctx, r.ID, "healthy", int(latency), "")
-	_ = m.store.UpdateRouterState(ctx, r.ID, r.RuntimeState, r.TargetAddr, r.ContainerID, r.NativePanelURL, "healthy")
+	panel := fmt.Sprintf("/%s%s", r.Slug, ad.NativePanelPath(r))
+	_ = m.store.UpdateRouterState(ctx, r.ID, "running", targetAddr, r.ContainerID, panel, "healthy")
+	_ = m.store.SetDesiredState(ctx, r.ID, "running")
+	_ = m.cache.SetRoute(ctx, r.Slug, targetAddr)
+	m.table.Set(r.Slug, targetAddr)
+
 	m.emitEvent(r.ID, "state_changed", map[string]any{
-		"health_status": "healthy",
-		"runtime_state": r.RuntimeState,
-		"slug":          r.Slug,
+		"status":           "running",
+		"health_status":    "healthy",
+		"runtime_state":    "running",
+		"desired_state":    "running",
+		"target_addr":      targetAddr,
+		"native_panel_url": panel,
+		"slug":             r.Slug,
 	})
 	return nil
 }
 
 // ----- internals -----
 
-func (m *Manager) ensureImage(ctx context.Context, ref string) error {
+func (m *Manager) ensureImage(ctx context.Context, r *store.Router, ref string) error {
+	// 1. Fast path: check if image is already present in the local Docker daemon
+	if _, _, err := m.docker.ImageInspectWithRaw(ctx, ref); err == nil {
+		log.Printf("[manager] image %s already cached locally; skipping pull", ref)
+		if r != nil {
+			m.emitEvent(r.ID, "log", map[string]any{
+				"data": fmt.Sprintf("[orchestrator] Image %s already cached locally.", ref),
+			})
+		}
+		return nil
+	}
+
+	log.Printf("[manager] pulling image %s from registry...", ref)
+	if r != nil {
+		m.emitEvent(r.ID, "log", map[string]any{
+			"data": fmt.Sprintf("[orchestrator] Pulling image %s from registry...", ref),
+		})
+	}
 	reader, err := m.docker.ImagePull(ctx, ref, image.PullOptions{})
 	if err != nil {
-		return err
+		return fmt.Errorf("pull error: %w", err)
 	}
-	_, _ = io.Copy(io.Discard, reader)
-	return reader.Close()
+	defer reader.Close()
+
+	// Stream pull progress and capture any registry errors
+	dec := json.NewDecoder(reader)
+	var pullMsg struct {
+		Status      string `json:"status"`
+		Progress    string `json:"progress"`
+		ID          string `json:"id"`
+		Error       string `json:"error"`
+		ErrorDetail struct {
+			Message string `json:"message"`
+		} `json:"errorDetail"`
+	}
+
+	for dec.More() {
+		if err := dec.Decode(&pullMsg); err != nil {
+			break
+		}
+		if pullMsg.Error != "" {
+			return fmt.Errorf("docker pull failed: %s", pullMsg.Error)
+		}
+		if pullMsg.ErrorDetail.Message != "" {
+			return fmt.Errorf("docker pull failed: %s", pullMsg.ErrorDetail.Message)
+		}
+		if r != nil && pullMsg.Status != "" {
+			var line string
+			if pullMsg.ID != "" && pullMsg.Progress != "" {
+				line = fmt.Sprintf("[docker] %s: %s %s", pullMsg.ID, pullMsg.Status, pullMsg.Progress)
+			} else if pullMsg.ID != "" {
+				line = fmt.Sprintf("[docker] %s: %s", pullMsg.ID, pullMsg.Status)
+			} else {
+				line = fmt.Sprintf("[docker] %s", pullMsg.Status)
+			}
+			m.emitEvent(r.ID, "log", map[string]any{
+				"data": line,
+			})
+		}
+	}
+
+	log.Printf("[manager] successfully pulled image %s", ref)
+	if r != nil {
+		m.emitEvent(r.ID, "log", map[string]any{
+			"data": fmt.Sprintf("[orchestrator] Successfully pulled image %s", ref),
+		})
+	}
+	return nil
 }
 
 // BUG-5 FIX: stopAndRemove operates on a *local* copy of the router so it
@@ -741,6 +992,24 @@ func hostPortFromURL(u string) string {
 	return s
 }
 
+func getDefaultGateway() string {
+	data, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return "172.17.0.1"
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[1] == "00000000" { // Destination 0.0.0.0
+			var ip [4]byte
+			if n, _ := fmt.Sscanf(fields[2], "%02X%02X%02X%02X", &ip[3], &ip[2], &ip[1], &ip[0]); n == 4 {
+				return net.IPv4(ip[0], ip[1], ip[2], ip[3]).String()
+			}
+		}
+	}
+	return "172.17.0.1"
+}
+
 func (m *Manager) getCandidates(ctx context.Context, containerID string, port int) []string {
 	insp, err := m.docker.ContainerInspect(ctx, containerID)
 	if err != nil {
@@ -767,7 +1036,21 @@ func (m *Manager) getCandidates(ctx context.Context, containerID string, port in
 		}
 	}
 
-	// 1. Direct container IP from networks (preferred for bridge container-to-container routing)
+	// 1. Published host ports (most reliable for Docker-socket sibling containers on Clever Cloud)
+	hostGateways := []string{getDefaultGateway(), gatewayIP, "172.17.0.1", "127.0.0.1", "localhost", "host.docker.internal"}
+	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
+		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok {
+			for _, b := range bindings {
+				if b.HostPort != "" {
+					for _, gw := range hostGateways {
+						addCand(fmt.Sprintf("http://%s:%s", gw, b.HostPort))
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Direct container IP from networks
 	if insp.NetworkSettings != nil {
 		for _, n := range insp.NetworkSettings.Networks {
 			if n.IPAddress != "" {
@@ -779,16 +1062,10 @@ func (m *Manager) getCandidates(ctx context.Context, containerID string, port in
 		}
 	}
 
-	// 2. Published host ports (fallback if bridge IP is unreachable)
-	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
-		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok {
-			for _, b := range bindings {
-				if b.HostPort != "" {
-					addCand(fmt.Sprintf("http://127.0.0.1:%s", b.HostPort))
-					addCand(fmt.Sprintf("http://%s:%s", gatewayIP, b.HostPort))
-				}
-			}
-		}
+	// 3. Container Name DNS
+	cleanName := strings.TrimPrefix(insp.Name, "/")
+	if cleanName != "" {
+		addCand(fmt.Sprintf("http://%s:%d", cleanName, port))
 	}
 
 	return candidates
@@ -835,19 +1112,30 @@ func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapte
 	case <-time.After(1500 * time.Millisecond):
 	}
 
+	probePaths := []string{ad.HealthPath(r)}
+	if p := ad.NativePanelPath(r); p != "" && p != ad.HealthPath(r) {
+		probePaths = append(probePaths, p)
+	}
+	probePaths = append(probePaths, "/login", "/", "/v1/models")
+
 	for time.Now().Before(deadline) {
 		candidates := m.getCandidates(ctx, containerID, port)
 		for _, cand := range candidates {
-			url := strings.TrimRight(cand, "/") + ad.HealthPath(r)
-			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-			if err == nil {
-				resp, err := probeClient.Do(req)
+			for _, p := range probePaths {
+				if p == "" {
+					continue
+				}
+				url := strings.TrimRight(cand, "/") + p
+				req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 				if err == nil {
-					status := resp.StatusCode
-					resp.Body.Close()
-					if status < 500 {
-						log.Printf("[health-check] %s verified healthy at %s (HTTP %d)", r.Slug, cand, status)
-						return cand, true
+					resp, err := probeClient.Do(req)
+					if err == nil {
+						status := resp.StatusCode
+						resp.Body.Close()
+						if status < 500 {
+							log.Printf("[health-check] %s verified healthy at %s (path %s, HTTP %d)", r.Slug, cand, p, status)
+							return cand, true
+						}
 					}
 				}
 			}
@@ -870,6 +1158,20 @@ func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapte
 		}
 	}
 	log.Printf("[health-check] %s failed to become healthy within %v", r.Slug, maxWait)
+	if logReader, err := m.docker.ContainerLogs(context.Background(), containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Tail:       "50",
+	}); err == nil {
+		defer logReader.Close()
+		logBytes, _ := io.ReadAll(logReader)
+		if len(logBytes) > 0 {
+			log.Printf("[health-check] %s container startup log tail:\n%s", r.Slug, string(logBytes))
+			m.emitEvent(r.ID, "log", map[string]any{
+				"data": fmt.Sprintf("[container-crash-log]\n%s", string(logBytes)),
+			})
+		}
+	}
 	return "", false
 }
 
@@ -919,16 +1221,25 @@ func countProviders(models []store.Model) int {
 func (m *Manager) checkAnyWorking(ctx context.Context, containerID string, port int, healthPath string) (string, bool) {
 	candidates := m.getCandidates(ctx, containerID, port)
 	probeClient := &http.Client{Timeout: 1500 * time.Millisecond}
+	paths := []string{healthPath}
+	if healthPath != "" && healthPath != "/" {
+		paths = append(paths, "/", "/login", "/v1/models")
+	}
 	for _, cand := range candidates {
-		url := strings.TrimRight(cand, "/") + healthPath
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err == nil {
-			resp, err := probeClient.Do(req)
+		for _, p := range paths {
+			if p == "" {
+				continue
+			}
+			url := strings.TrimRight(cand, "/") + p
+			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 			if err == nil {
-				status := resp.StatusCode
-				resp.Body.Close()
-				if status < 500 {
-					return cand, true
+				resp, err := probeClient.Do(req)
+				if err == nil {
+					status := resp.StatusCode
+					resp.Body.Close()
+					if status < 500 {
+						return cand, true
+					}
 				}
 			}
 		}

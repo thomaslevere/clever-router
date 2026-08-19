@@ -28,22 +28,8 @@ func NewSupervisor(m *adapters.Manager, st *store.Store, c *cache.Cache, t *rout
 // Boot reconciles desired state on startup. Each router is started in its own
 // goroutine so a slow image pull or unhealthy router doesn't block others.
 func (s *Supervisor) Boot(ctx context.Context) {
-	routers, err := s.store.ListRouters(ctx)
-	if err != nil {
-		log.Printf("[supervisor] list routers: %v", err)
-		return
-	}
-	for _, r := range routers {
-		if r.DesiredState == "running" {
-			go func(r store.Router) {
-				log.Printf("[supervisor] starting router %s (%s)", r.Slug, r.ImageRef)
-				if err := s.manager.Start(ctx, &r); err != nil {
-					log.Printf("[supervisor] failed to start %s: %v", r.Slug, err)
-				}
-			}(r)
-		} else {
-			s.table.Delete(r.Slug)
-		}
+	if err := s.manager.ReconcileAndStartAll(ctx); err != nil {
+		log.Printf("[supervisor] boot reconciliation error: %v", err)
 	}
 }
 
@@ -109,16 +95,10 @@ func (c *Checker) tick(ctx context.Context) {
 		return
 	}
 	for _, r := range routers {
-		if r.RuntimeState != "running" && r.RuntimeState != "unhealthy" {
-			continue
-		}
-		if r.TargetAddr == "" {
-			continue
-		}
 		go func(r store.Router) {
 			if err := c.manager.HealthCheck(ctx, &r); err != nil {
-				log.Printf("[health] %s: %v", r.Slug, err)
-			} else if r.RuntimeState == "running" {
+				// failed health check is logged in manager
+			} else {
 				_ = c.manager.Snapshot(ctx, &r)
 			}
 		}(r)

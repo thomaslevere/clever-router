@@ -73,7 +73,7 @@ func Load() (*Config, error) {
 		EncryptionKey:     getenv("ENCRYPTION_KEY", ""),
 		DockerSocket:      getenv("DOCKER_HOST", "unix:///var/run/docker.sock"),
 		AdminInternalAddr: getenv("ADMIN_INTERNAL_ADDR", "127.0.0.1:3000"),
-		AllowedImages:     splitCSV(getenv("ALLOWED_IMAGES", "diegosouzapw/omniroute:latest,ghcr.io/berriai/litellm:main-stable")),
+		AllowedImages:     splitCSV(getenv("ALLOWED_IMAGES", "diegosouzapw/omniroute:latest,ghcr.io/berriai/litellm:main-stable,decolua/9router:latest,ghcr.io/decolua/9router:latest,9router/9router:latest,tashfeenahmed/freellmapi:latest,ghcr.io/tashfeenahmed/freellmapi:latest,freellmapi/freellmapi:latest")),
 		AdminToken:        getenv("ADMIN_API_KEY", ""),
 		Environment:       getenv("APP_ENV", "production"),
 		VolumeScratchDir:  getenv("VOLUME_SCRATCH_DIR", "/tmp/clever_router_volumes"),

@@ -80,12 +80,15 @@ type Router struct {
 	Slug                   string        `json:"slug"`
 	Name                   string        `json:"name"`
 	AdapterType            string        `json:"adapter_type"`
+	ProviderType           string        `json:"provider_type,omitempty"`
 	ImageRef               string        `json:"image_ref"`
 	DesiredVersion         string        `json:"desired_version"`
 	CurrentVersion         string        `json:"current_version"`
 	EndpointPath           string        `json:"endpoint_path"`
+	RoutePath              string        `json:"route_path,omitempty"`
 	NativePanelURL         string        `json:"native_panel_url"`
 	DesiredState           string        `json:"desired_state"`
+	DesiredStatus          string        `json:"desired_status,omitempty"`
 	RuntimeState           string        `json:"runtime_state"`
 	TargetAddr             string        `json:"target_addr"`
 	ContainerID            string        `json:"container_id"`
@@ -177,24 +180,33 @@ func (s *Store) UpdateRouterState(ctx context.Context, id, runtimeState, targetA
 	_, err := s.Pool.Exec(ctx, `
 		UPDATE routers SET runtime_state=$2, target_addr=$3, container_id=$4, native_panel_url=$5,
 		                   health_status=$6, last_seen_at=now(), updated_at=now()
-		WHERE id=$1`,
+		WHERE id::text=$1 OR slug=$1`,
 		id, runtimeState, targetAddr, containerID, nativePanelURL, health)
 	return err
 }
 
 func (s *Store) UpdateRouterCounts(ctx context.Context, id string, providers, models int) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE routers SET providers_count=$2, models_count=$3, updated_at=now() WHERE id=$1`,
+	_, err := s.Pool.Exec(ctx, `UPDATE routers SET providers_count=$2, models_count=$3, updated_at=now() WHERE id::text=$1 OR slug=$1`,
 		id, providers, models)
 	return err
 }
 
 func (s *Store) SetDesiredState(ctx context.Context, id, state string) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE routers SET desired_state=$2, updated_at=now() WHERE id=$1`, id, state)
+	_, err := s.Pool.Exec(ctx, `UPDATE routers SET desired_state=$2, desired_status=$2, updated_at=now() WHERE id::text=$1 OR slug=$1`, id, state)
 	return err
+}
+
+func (s *Store) SetRouterDesiredStatus(ctx context.Context, id, status string) error {
+	return s.SetDesiredState(ctx, id, status)
 }
 
 func (s *Store) UpdateRouter(ctx context.Context, id, name string, config Map) error {
 	_, err := s.Pool.Exec(ctx, `UPDATE routers SET name=$2, config=$3, updated_at=now() WHERE id=$1`, id, name, config)
+	return err
+}
+
+func (s *Store) UpdateRouterImage(ctx context.Context, id, imageRef string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE routers SET image_ref=$2, updated_at=now() WHERE id=$1`, id, imageRef)
 	return err
 }
 
@@ -237,6 +249,18 @@ func scanRouter(sc Scanner) (Router, error) {
 	r.EnvVars = []EnvVariable{}
 	if envVarsRaw != "" && envVarsRaw != "null" {
 		_ = json.Unmarshal([]byte(envVarsRaw), &r.EnvVars)
+	}
+	if r.ProviderType == "" {
+		r.ProviderType = r.AdapterType
+	}
+	if r.RoutePath == "" {
+		r.RoutePath = r.EndpointPath
+	}
+	if r.DesiredStatus == "" {
+		r.DesiredStatus = r.DesiredState
+	}
+	if r.DesiredState == "" {
+		r.DesiredState = r.DesiredStatus
 	}
 	return r, nil
 }

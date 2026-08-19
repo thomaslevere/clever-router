@@ -974,7 +974,20 @@ func (m *Manager) getCandidates(ctx context.Context, containerID string, port in
 		}
 	}
 
-	// 1. Direct container IP from networks (preferred for bridge container-to-container routing)
+	// 1. Published host ports (most reliable for Docker-socket sibling containers across isolated network namespaces)
+	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
+		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok {
+			for _, b := range bindings {
+				if b.HostPort != "" {
+					addCand(fmt.Sprintf("http://%s:%s", gatewayIP, b.HostPort))
+					addCand(fmt.Sprintf("http://127.0.0.1:%s", b.HostPort))
+					addCand(fmt.Sprintf("http://localhost:%s", b.HostPort))
+				}
+			}
+		}
+	}
+
+	// 2. Direct container IP from networks (fallback if on same docker network)
 	if insp.NetworkSettings != nil {
 		for _, n := range insp.NetworkSettings.Networks {
 			if n.IPAddress != "" {
@@ -983,18 +996,6 @@ func (m *Manager) getCandidates(ctx context.Context, containerID string, port in
 		}
 		if insp.NetworkSettings.IPAddress != "" {
 			addCand(fmt.Sprintf("http://%s:%d", insp.NetworkSettings.IPAddress, port))
-		}
-	}
-
-	// 2. Published host ports (fallback if bridge IP is unreachable)
-	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
-		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok {
-			for _, b := range bindings {
-				if b.HostPort != "" {
-					addCand(fmt.Sprintf("http://127.0.0.1:%s", b.HostPort))
-					addCand(fmt.Sprintf("http://%s:%s", gatewayIP, b.HostPort))
-				}
-			}
 		}
 	}
 

@@ -502,6 +502,8 @@ func (a *API) createRouter(c *gin.Context) {
 			imageRef = "coaidev/coai:latest"
 		case "llmgateway":
 			imageRef = "ghcr.io/theopenco/llmgateway-unified:latest"
+		case "openconnector":
+			imageRef = "ghcr.io/oomol-lab/open-connector:latest"
 		default:
 			imageRef = "diegosouzapw/omniroute:latest"
 		}

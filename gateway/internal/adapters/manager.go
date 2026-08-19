@@ -194,7 +194,9 @@ func (m *Manager) imageAllowed(ref string) bool {
 		strings.Contains(clean, "litellm") ||
 		strings.Contains(clean, "coai") ||
 		strings.Contains(clean, "chatnio") ||
-		strings.Contains(clean, "llmgateway") {
+		strings.Contains(clean, "llmgateway") ||
+		strings.Contains(clean, "openconnector") ||
+		strings.Contains(clean, "open-connector") {
 		return true
 	}
 	return m.allowed[ref] || m.allowed[shortRef(ref)] || m.allowed[clean]
@@ -888,6 +890,13 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
 				{RouterID: r.ID, ModelID: "deepseek-chat", Provider: "deepseek", Modalities: "chat"},
 				{RouterID: r.ID, ModelID: "gemini-1.5-pro", Provider: "gemini", Modalities: "chat"},
+			}
+		case "openconnector":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "mcp-tool-connector", Provider: "openconnector", Modalities: "tool"},
+				{RouterID: r.ID, ModelID: "saas-action-runner", Provider: "openconnector", Modalities: "tool"},
 			}
 		}
 	}

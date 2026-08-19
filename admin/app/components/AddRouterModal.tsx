@@ -6,6 +6,7 @@ import type { Router } from "../lib/types";
 
 const adapters = [
   { value: "omniroute", label: "OmniRoute", image: "diegosouzapw/omniroute:latest" },
+  { value: "openconnector", label: "OpenConnector (OOMOL Lab)", image: "ghcr.io/oomol-lab/open-connector:latest" },
   { value: "llmgateway", label: "LLM Gateway (TheOpenCo)", image: "ghcr.io/theopenco/llmgateway-unified:latest" },
   { value: "coai", label: "CoAI Gateway (Chat Nio)", image: "coaidev/coai:latest" },
   { value: "bifrost", label: "Bifrost (Maxim AI)", image: "maximhq/bifrost:latest" },
@@ -43,8 +44,8 @@ export default function AddRouterModal({
       ...f,
       adapter_type: v,
       image_ref: a.image || f.image_ref,
-      slug: f.slug === "" || ["omniroute", "llmgateway", "coai", "bifrost", "new-api", "portkey", "9router", "freellmapi", "litellm"].includes(f.slug) ? v : f.slug,
-      endpoint_path: f.endpoint_path === "" || ["/omniroute", "/llmgateway", "/coai", "/bifrost", "/new-api", "/portkey", "/9router", "/freellmapi", "/litellm", "/omniroute/v1", "/llmgateway/v1", "/coai/v1", "/bifrost/v1", "/new-api/v1", "/portkey/v1", "/9router/v1", "/freellmapi/v1", "/litellm/v1"].includes(f.endpoint_path) ? `/${v}` : f.endpoint_path,
+      slug: f.slug === "" || ["omniroute", "openconnector", "llmgateway", "coai", "bifrost", "new-api", "portkey", "9router", "freellmapi", "litellm"].includes(f.slug) ? v : f.slug,
+      endpoint_path: f.endpoint_path === "" || ["/omniroute", "/openconnector", "/llmgateway", "/coai", "/bifrost", "/new-api", "/portkey", "/9router", "/freellmapi", "/litellm", "/omniroute/v1", "/openconnector/v1", "/llmgateway/v1", "/coai/v1", "/bifrost/v1", "/new-api/v1", "/portkey/v1", "/9router/v1", "/freellmapi/v1", "/litellm/v1"].includes(f.endpoint_path) ? `/${v}` : f.endpoint_path,
     }));
   }
 
@@ -216,6 +217,22 @@ export default function AddRouterModal({
               <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
                 <span>Multi-core acceleration:</span>
                 <span className="font-mono text-emerald-600 dark:text-emerald-400 font-bold">12 vCPUs / 8 GB</span>
+              </div>
+            </div>
+          )}
+
+          {form.adapter_type === "openconnector" && (
+            <div className="space-y-2 rounded-lg bg-teal-500/5 dark:bg-teal-500/10 p-3.5 border border-teal-500/20">
+              <div className="flex items-center gap-2 font-semibold text-teal-600 dark:text-teal-400 text-xs">
+                <span>🔌</span>
+                <span>OpenConnector (OOMOL Lab)</span>
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                Auth and tool gateway connecting 1,000+ SaaS providers and 10,000+ Actions to AI agents via HTTP, MCP, and OpenAPI. Automatic secret generation (<code className="font-mono text-teal-600 dark:text-teal-400">AUTH_SECRET</code>, <code className="font-mono text-teal-600 dark:text-teal-400">ENCRYPTION_KEY</code>) and S3 persistence enabled.
+              </p>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
+                <span>Multi-core acceleration:</span>
+                <span className="font-mono text-teal-600 dark:text-teal-400 font-bold">12 vCPUs / 6 GB</span>
               </div>
             </div>
           )}

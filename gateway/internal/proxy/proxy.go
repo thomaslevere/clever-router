@@ -131,6 +131,16 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 		}
 	}
 
+	// 2. Direct PostgreSQL fallback if in-memory table has not synced yet
+	if !ok && slug != "" {
+		if r, err := p.store.GetRouterBySlug(c.Request.Context(), slug); err == nil && r != nil && r.TargetAddr != "" {
+			targetSlug = r.Slug
+			target = r.TargetAddr
+			ok = true
+			p.table.Set(r.Slug, r.TargetAddr)
+		}
+	}
+
 	if !ok {
 		fail(c, http.StatusBadGateway, "router '%s' is not serving", slug)
 		return

@@ -1062,19 +1062,30 @@ func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapte
 	case <-time.After(1500 * time.Millisecond):
 	}
 
+	probePaths := []string{ad.HealthPath(r)}
+	if p := ad.NativePanelPath(r); p != "" && p != ad.HealthPath(r) {
+		probePaths = append(probePaths, p)
+	}
+	probePaths = append(probePaths, "/login", "/", "/v1/models")
+
 	for time.Now().Before(deadline) {
 		candidates := m.getCandidates(ctx, containerID, port)
 		for _, cand := range candidates {
-			url := strings.TrimRight(cand, "/") + ad.HealthPath(r)
-			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-			if err == nil {
-				resp, err := probeClient.Do(req)
+			for _, p := range probePaths {
+				if p == "" {
+					continue
+				}
+				url := strings.TrimRight(cand, "/") + p
+				req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 				if err == nil {
-					status := resp.StatusCode
-					resp.Body.Close()
-					if status < 500 {
-						log.Printf("[health-check] %s verified healthy at %s (HTTP %d)", r.Slug, cand, status)
-						return cand, true
+					resp, err := probeClient.Do(req)
+					if err == nil {
+						status := resp.StatusCode
+						resp.Body.Close()
+						if status < 500 {
+							log.Printf("[health-check] %s verified healthy at %s (path %s, HTTP %d)", r.Slug, cand, p, status)
+							return cand, true
+						}
 					}
 				}
 			}

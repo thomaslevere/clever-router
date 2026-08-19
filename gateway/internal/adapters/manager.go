@@ -849,6 +849,12 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
 				{RouterID: r.ID, ModelID: "deepseek-chat", Provider: "deepseek", Modalities: "chat"},
 			}
+		case "portkey":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "deepseek-chat", Provider: "deepseek", Modalities: "chat"},
+			}
 		}
 	}
 

@@ -273,7 +273,7 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		if existing, err := m.docker.ContainerInspect(ctx, name); err == nil && existing.State != nil && existing.State.Running {
 			if workingAddr, ok := m.checkAnyWorking(ctx, existing.ID, ad.InternalPort(r), ad.HealthPath(r)); ok {
 				log.Printf("[manager] router %s (%s) is already running and healthy at %s. Skipping duplicate start.", r.Slug, existing.ID[:12], workingAddr)
-				panel := fmt.Sprintf("/app/%s%s", r.Slug, ad.NativePanelPath(r))
+				panel := fmt.Sprintf("/%s%s", r.Slug, ad.NativePanelPath(r))
 				_ = m.store.UpdateRouterState(ctx, r.ID, "running", workingAddr, existing.ID, panel, "healthy")
 				_ = m.cache.SetRoute(ctx, r.Slug, workingAddr)
 				m.table.Set(r.Slug, workingAddr)
@@ -446,7 +446,7 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 			fallbackAddr = cands[0]
 		}
 		// Use consistent /app/:slug format for panel URL (same as the healthy branch below)
-		panel := fmt.Sprintf("/app/%s%s", r.Slug, ad.NativePanelPath(r))
+		panel := fmt.Sprintf("/%s%s", r.Slug, ad.NativePanelPath(r))
 		_ = m.store.UpdateRouterState(ctx, r.ID, "unhealthy", fallbackAddr, created.ID, panel, "unhealthy")
 		_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
 		m.emitEvent(r.ID, "state_changed", map[string]any{
@@ -459,7 +459,7 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		return fmt.Errorf("router %s started but did not pass health check within 90s", r.Slug)
 	}
 
-	panel := fmt.Sprintf("/app/%s%s", r.Slug, ad.NativePanelPath(r))
+	panel := fmt.Sprintf("/%s%s", r.Slug, ad.NativePanelPath(r))
 	if err := m.store.UpdateRouterState(ctx, r.ID, "running", workingAddr, created.ID, panel, "healthy"); err != nil {
 		return err
 	}

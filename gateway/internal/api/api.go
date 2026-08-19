@@ -101,8 +101,19 @@ func New(d Deps) *API {
 			modelsCount, _ := payload["models_count"].(int)
 			providersCount, _ := payload["providers_count"].(int)
 
+			// Normalize "log" event type to "log_chunk" for frontend compatibility,
+			// and extract the "data" payload field into LogMessage.
+			wsEventType := eventType
+			logMessage := ""
+			if eventType == "log" {
+				wsEventType = "log_chunk"
+				if data, ok := payload["data"].(string); ok {
+					logMessage = data
+				}
+			}
+
 			routerHub.Broadcast(routerID, RouterEvent{
-				Type:           eventType,
+				Type:           wsEventType,
 				RouterID:       routerID,
 				Status:         status,
 				DesiredState:   desiredState,
@@ -110,6 +121,7 @@ func New(d Deps) *API {
 				HealthStatus:   healthStatus,
 				TargetAddr:     targetAddr,
 				NativePanelURL: nativePanelURL,
+				LogMessage:     logMessage,
 				ModelsCount:    modelsCount,
 				ProvidersCount: providersCount,
 				Payload:        payload,
@@ -171,18 +183,13 @@ func (a *API) Register(r *gin.Engine) {
 	a.registerAdmin(rest.Group("/"))
 	a.rest = rest
 
-	// Namespaced AI proxy & App UI proxy:
-	// /app/:slug/*path -> Web UI and dashboard of the router container (e.g. /app/omniroute/dashboard)
-	// /:slug/*path     -> OpenAI-compatible API routes (e.g. /omniroute/v1/chat/completions) & fallback UI
+	// Namespaced proxy: /:slug/* serves BOTH the OpenAI-compatible API and the
+	// native router dashboard/UI. No /app/ prefix — everything is under /:slug.
+	// Example: /omnirouter/v1/chat/completions (API)
+	// Example: /omnirouter/dashboard           (native UI)
 	p := proxy.New(a.table, keys.NewAuth(a.store, a.cache), a.store, a.cache, a.cfg)
-	r.Any("/app/:slug", p.HandleApp)
-	r.Any("/app/:slug/*path", p.HandleApp)
 	r.Any("/:slug", p.Handle)
 	r.Any("/:slug/*path", p.Handle)
-	// NOTE: No r.NoRoute() catch-all here. The /:slug/*path route already catches
-	// all legitimate router paths. A NoRoute handler would hijack unrelated paths
-	// (/, /favicon.ico, etc.) and route them to the proxy with an empty slug,
-	// producing confusing "router '' is not serving" errors.
 }
 
 // adminRoot routes /admin/api/* to the private REST engine and everything else

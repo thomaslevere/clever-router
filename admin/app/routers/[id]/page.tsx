@@ -266,11 +266,11 @@ export default function RouterDetailPage() {
             {/* Start Button */}
             <button
               className="btn-primary text-xs shadow-sm flex items-center gap-1.5 transition-all"
-              disabled={isRunning || isStarting || isStopping || isWiping}
+              disabled={isRunning || isStopping || isWiping || realtime.busyAction === "start"}
               onClick={realtime.handleStart}
             >
-              {isStarting && <span className="inline-block animate-spin text-xs">⏳</span>}
-              <span>{isStarting ? "Starting…" : "▶ Start"}</span>
+              {realtime.busyAction === "start" && <span className="inline-block animate-spin text-xs">⏳</span>}
+              <span>{realtime.busyAction === "start" ? "Starting…" : "▶ Start"}</span>
             </button>
 
             {/* Restart Button */}

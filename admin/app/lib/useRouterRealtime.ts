@@ -102,13 +102,13 @@ export function useRouterRealtime(routerId: string, initialRouter: Router | null
               const newRuntime = msg.runtime_state || msg.status || prev.runtimeState;
               const newHealth = msg.health_status || prev.healthStatus;
               
-              // Clear busy action once transition completes
+              // Clear busy action once transition completes (including failed state)
               let newBusy = prev.busyAction;
-              if (prev.busyAction === "start" && (newRuntime === "running" || newRuntime === "unhealthy")) {
+              if (prev.busyAction === "start" && (newRuntime === "running" || newRuntime === "unhealthy" || newRuntime === "failed")) {
                 newBusy = "";
-              } else if (prev.busyAction === "stop" && newRuntime === "stopped") {
+              } else if (prev.busyAction === "stop" && (newRuntime === "stopped" || newRuntime === "failed")) {
                 newBusy = "";
-              } else if (prev.busyAction === "restart" && newRuntime === "running") {
+              } else if (prev.busyAction === "restart" && (newRuntime === "running" || newRuntime === "failed")) {
                 newBusy = "";
               }
 
@@ -125,11 +125,14 @@ export function useRouterRealtime(routerId: string, initialRouter: Router | null
               };
             });
             if (onRefreshRef.current) onRefreshRef.current();
-          } else if (msg.type === "log_chunk") {
-            if (msg.log_message) {
+          } else if (msg.type === "log_chunk" || msg.type === "log") {
+            // Handle both "log_chunk" (normalized) and "log" (legacy) event types.
+            // Log message can be in msg.log_message or msg.payload?.data
+            const logText = msg.log_message || msg.payload?.data || "";
+            if (logText) {
               setState((prev) => ({
                 ...prev,
-                logs: [...prev.logs.slice(-499), msg.log_message],
+                logs: [...prev.logs.slice(-499), logText],
               }));
             }
           } else if (msg.type === "models_updated") {
@@ -204,7 +207,10 @@ export function useRouterRealtime(routerId: string, initialRouter: Router | null
 
   // Interactive Action Handlers with Debounce Lock
   const handleStart = async () => {
-    if (state.busyAction || state.runtimeState === "starting" || state.runtimeState === "running") {
+    // Only block if there's an active client-side operation in progress,
+    // or the router is genuinely running. Do NOT block on stale "starting"
+    // state from a previous crashed attempt — allow re-start.
+    if (state.busyAction || state.runtimeState === "running") {
       return;
     }
     setState((prev) => ({

@@ -126,18 +126,19 @@ export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: strin
       const u = new URL(path);
       path = u.pathname;
     } catch {
-      path = `/app/${slug}/dashboard`;
+      path = `/${slug}/dashboard`;
     }
   }
 
+  // Normalize: strip any stale /app/ prefix
+  if (path.startsWith(`/app/${slug}`)) {
+    path = path.replace(`/app/${slug}`, `/${slug}`);
+  }
+
   if (!path || path === "/" || path === "/dashboard") {
-    path = `/app/${slug}/dashboard`;
-  } else if (!path.startsWith(`/app/${slug}`)) {
-    if (path.startsWith(`/${slug}`)) {
-      path = `/app${path}`;
-    } else {
-      path = `/app/${slug}${path.startsWith("/") ? path : `/${path}`}`;
-    }
+    path = `/${slug}/dashboard`;
+  } else if (!path.startsWith(`/${slug}`)) {
+    path = `/${slug}${path.startsWith("/") ? path : `/${path}`}`;
   }
 
   const base = window.location.origin;

@@ -65,35 +65,27 @@ type proxyError struct {
 	Error  string `json:"error"`
 }
 
-// HandleApp serves the web UI and dashboard of the container mounted under /app/:slug/*path.
-// The /app/ prefix namespace is dedicated to serving native router dashboards and web UIs.
-func (p *Proxy) HandleApp(c *gin.Context) {
-	p.handleRequest(c, true)
-}
-
-// Handle serves OpenAI-compatible APIs and fallback routes under /:slug/*path.
-// This is the primary entry point for API traffic (e.g., /omnirouter/v1/chat/completions).
+// Handle serves both OpenAI-compatible APIs and native router dashboards under /:slug/*path.
+// Example: /omnirouter/v1/chat/completions (API)
+// Example: /omnirouter/dashboard           (native UI)
 func (p *Proxy) Handle(c *gin.Context) {
 	slug := c.Param("slug")
 
 	// Root path or empty slug: return clean service info instead of 502.
-	// This handles GET / (no matching router slug) and NoRoute fallback.
-	if slug == "" || (!p.table.Has(slug) && !isWebOrAssetPath(c.Request.URL.Path) && c.Request.URL.Path == "/"+slug) {
-		if slug == "" {
-			c.JSON(200, gin.H{
-				"service": "CleverRoute",
-				"status":  "ok",
-				"admin":   "/admin",
-				"docs":    "Use /:slug/v1/* to access router APIs",
-			})
-			return
-		}
+	if slug == "" {
+		c.JSON(200, gin.H{
+			"service": "CleverRoute",
+			"status":  "ok",
+			"admin":   "/admin",
+			"docs":    "Use /:slug/v1/* to access router APIs",
+		})
+		return
 	}
 
-	p.handleRequest(c, false)
+	p.handleRequest(c)
 }
 
-func (p *Proxy) handleRequest(c *gin.Context, isApp bool) {
+func (p *Proxy) handleRequest(c *gin.Context) {
 	slug := c.Param("slug")
 	path := c.Param("path")
 
@@ -121,21 +113,9 @@ func (p *Proxy) handleRequest(c *gin.Context, isApp bool) {
 	token := p.extractToken(c)
 
 	prefix := "/" + targetSlug
-	if isApp {
-		prefix = "/app/" + targetSlug
-	}
 
-	// Trailing slash normalization & dashboard landing for UI root
+	// Trailing slash normalization for root slug path
 	if (path == "" || path == "/") && targetSlug == slug && c.Request.Method == "GET" {
-		if isApp {
-			redirectURL := prefix + "/dashboard"
-			if token != "" {
-				redirectURL += "?token=" + url.QueryEscape(token)
-			}
-			c.Redirect(http.StatusTemporaryRedirect, redirectURL)
-			return
-		}
-
 		if !strings.HasSuffix(c.Request.URL.Path, "/") {
 			redirectURL := prefix + "/"
 			if c.Request.URL.RawQuery != "" {
@@ -380,7 +360,7 @@ func (p *Proxy) handleRequest(c *gin.Context, isApp bool) {
 	}
 }
 
-// rewriteLocation prepends the router prefix (e.g. /app/omniroute or /omniroute) to relative and internal absolute redirects
+// rewriteLocation prepends the router prefix (e.g. /omniroute) to relative and internal absolute redirects
 func (p *Proxy) rewriteLocation(loc, prefix string) string {
 	if loc == "" || prefix == "" {
 		return loc
@@ -495,8 +475,7 @@ func (p *Proxy) findFallbackRouter(c *gin.Context) (string, string) {
 	if referer != "" {
 		snap := p.table.Snapshot()
 		for s, t := range snap {
-			if strings.Contains(referer, "/app/"+s+"/") || strings.Contains(referer, "/app/"+s+"?") || strings.HasSuffix(referer, "/app/"+s) ||
-				strings.Contains(referer, "/"+s+"/") || strings.Contains(referer, "/"+s+"?") || strings.HasSuffix(referer, "/"+s) {
+			if strings.Contains(referer, "/"+s+"/") || strings.Contains(referer, "/"+s+"?") || strings.HasSuffix(referer, "/"+s) {
 				return s, t
 			}
 		}

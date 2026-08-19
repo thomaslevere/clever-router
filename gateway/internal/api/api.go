@@ -481,6 +481,8 @@ func (a *API) createRouter(c *gin.Context) {
 			imageRef = "decolua/9router:latest"
 		case "freellmapi":
 			imageRef = "ghcr.io/tashfeenahmed/freellmapi:latest"
+		case "litellm":
+			imageRef = "ghcr.io/berriai/litellm:main-stable"
 		default:
 			imageRef = "diegosouzapw/omniroute:latest"
 		}

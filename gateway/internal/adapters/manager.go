@@ -664,7 +664,7 @@ func (m *Manager) StopAllForShutdown(ctx context.Context) {
 	}
 }
 
-// ReconcileAndStartAll starts only routers where desired_state or desired_status is "running".
+// ReconcileAndStartAll forcibly starts EVERY router on boot, regardless of last saved state.
 func (m *Manager) ReconcileAndStartAll(ctx context.Context) error {
 	routers, err := m.store.ListRouters(ctx)
 	if err != nil {
@@ -673,19 +673,17 @@ func (m *Manager) ReconcileAndStartAll(ctx context.Context) error {
 
 	startedCount := 0
 	for _, r := range routers {
-		if r.DesiredState == "running" || r.DesiredStatus == "running" {
-			log.Printf("[reconcile] auto-starting router %s (%s) based on desired state", r.Slug, r.ImageRef)
-			go func(router store.Router) {
-				bootCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				defer cancel()
-				if err := m.Start(bootCtx, &router); err != nil {
-					log.Printf("[reconcile] failed to start %s: %v", router.Slug, err)
-				}
-			}(r)
-			startedCount++
-		} else {
-			log.Printf("[reconcile] skipping stopped router %s (desired state: %s)", r.Slug, r.DesiredState)
-		}
+		log.Printf("[reconcile] forcibly auto-starting router %s (%s) on startup", r.Slug, r.ImageRef)
+		_ = m.store.SetDesiredState(ctx, r.ID, "running")
+
+		go func(router store.Router) {
+			bootCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			if err := m.Start(bootCtx, &router); err != nil {
+				log.Printf("[reconcile] failed to start %s: %v", router.Slug, err)
+			}
+		}(r)
+		startedCount++
 	}
 	log.Printf("[reconcile] boot reconciliation complete: %d/%d routers queued to start", startedCount, len(routers))
 	return nil

@@ -50,7 +50,7 @@ func (PortkeyAdapter) NativePanelPath(r *store.Router) string {
 	if p := strConfig(r, "native_panel_path"); p != "" {
 		return p
 	}
-	return "/v1/models"
+	return "/ui"
 }
 
 func (PortkeyAdapter) DeclaredVolumes(r *store.Router) []string {

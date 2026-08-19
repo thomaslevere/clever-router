@@ -260,8 +260,26 @@ export default function EnvironmentVariablesCard({
     }
   };
 
+  const toggleRevealSecret = async (index: number) => {
+    const env = envs[index];
+    const willShow = !showSecrets[index];
+    if (willShow && env.is_secret && (env.value === "********" || env.value === "")) {
+      try {
+        const res = await api.get<{ key: string; value: string }>(
+          `/routers/${routerId}/env/${encodeURIComponent(env.key)}/reveal`
+        );
+        if (res && res.value !== undefined) {
+          updateField(index, "value", res.value);
+        }
+      } catch (e: any) {
+        setStatusMsg({ type: "error", text: `Failed to reveal ${env.key}: ${e.message}` });
+      }
+    }
+    setShowSecrets((prev) => ({ ...prev, [index]: willShow }));
+  };
+
   return (
-    <div className="card shadow-md p-6 border border-black/10 dark:border-white/10">
+    <div className="card shadow-md p-6 border border-black/10 dark:border-white/10 mt-6">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-black/10 dark:border-white/10">
         <div>
@@ -425,9 +443,7 @@ export default function EnvironmentVariablesCard({
                     {env.is_secret && (
                       <button
                         type="button"
-                        onClick={() =>
-                          setShowSecrets((prev) => ({ ...prev, [index]: !prev[index] }))
-                        }
+                        onClick={() => toggleRevealSecret(index)}
                         className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xs px-1"
                         title={showSecrets[index] ? "Mask secret" : "Reveal secret"}
                       >

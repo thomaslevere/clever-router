@@ -241,6 +241,7 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 
 	// Router environment variables
 	g.GET("/routers/:id/env", a.getRouterEnv)
+	g.GET("/routers/:id/env/:key/reveal", a.revealRouterEnvKey)
 	g.PUT("/routers/:id/env", a.putRouterEnv)
 	g.POST("/routers/:id/env/apply", a.applyRouterEnv)
 
@@ -588,6 +589,36 @@ func (a *API) getRouterEnv(c *gin.Context) {
 		"env_vars":                  masked.EnvVars,
 		"auto_restart_on_env_change": r.AutoRestartOnEnvChange,
 	})
+}
+
+func (a *API) revealRouterEnvKey(c *gin.Context) {
+	r, err := a.findRouter(c, c.Param("id"))
+	if err != nil {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	targetKey := strings.TrimSpace(c.Param("key"))
+	for _, ev := range r.EnvVars {
+		if strings.EqualFold(strings.TrimSpace(ev.Key), targetKey) {
+			val := ev.Value
+			if ev.IsSecret && secrets.IsEncrypted(val) {
+				if dec, err := secrets.DecryptValue(a.box, val); err == nil {
+					val = dec
+				}
+			}
+			// OmniRoute fallback default if empty
+			if val == "" && strings.EqualFold(ev.Key, "INITIAL_PASSWORD") && r.AdapterType == "omniroute" {
+				val = "CHANGEME"
+			}
+			a.audit(c, "router.env.reveal", "router", r.ID, nil, store.Map{"key": targetKey, "slug": r.Slug})
+			c.JSON(200, gin.H{
+				"key":   ev.Key,
+				"value": val,
+			})
+			return
+		}
+	}
+	c.JSON(404, gin.H{"error": "key not found"})
 }
 
 type putRouterEnvReq struct {

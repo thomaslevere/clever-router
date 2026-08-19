@@ -426,9 +426,7 @@ func (b *FastVolumeBridge) HydrateContainerCandidateKeys(ctx context.Context, cl
 					strings.HasSuffix(baseName, ".sock") ||
 					strings.HasSuffix(baseName, ".sock.lock") ||
 					baseName == "pm2.pid" ||
-					baseName == "server.pid" ||
-					strings.HasSuffix(baseName, ".db-shm") ||
-					strings.HasSuffix(baseName, ".db-wal") {
+					baseName == "server.pid" {
 					continue
 				}
 
@@ -521,9 +519,7 @@ func (b *FastVolumeBridge) SnapshotContainer(ctx context.Context, cli *client.Cl
 			strings.HasSuffix(baseName, ".lock") ||
 			strings.HasSuffix(baseName, ".sock") ||
 			baseName == "pm2.pid" ||
-			baseName == "server.pid" ||
-			strings.HasSuffix(baseName, ".db-shm") ||
-			strings.HasSuffix(baseName, ".db-wal") {
+			baseName == "server.pid" {
 			continue
 		}
 

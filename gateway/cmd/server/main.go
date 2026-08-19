@@ -168,7 +168,7 @@ func main() {
 	// 2. Stop running router containers and flush their volumes to S3
 	shutdownFlushCtx, flushCancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer flushCancel()
-	mgr.StopAll(shutdownFlushCtx)
+	mgr.StopAllForShutdown(shutdownFlushCtx)
 
 	// 3. Final S3 flush of all router namespaces & logs
 	if bridge != nil {

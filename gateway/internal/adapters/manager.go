@@ -640,7 +640,27 @@ func (m *Manager) StopAll(ctx context.Context) {
 
 // StopAllForShutdown gracefully terminates containers during server shutdown without changing desired state in DB.
 func (m *Manager) StopAllForShutdown(ctx context.Context) {
-	m.StopAll(ctx)
+	routers, err := m.store.ListRouters(ctx)
+	if err != nil {
+		log.Printf("[manager] stop all list routers: %v", err)
+		return
+	}
+	for _, r := range routers {
+		if r.RuntimeState == "running" || r.ContainerID != "" {
+			log.Printf("[shutdown] snapshotting state for %s to S3...", r.Slug)
+			if m.bridge != nil {
+				_ = m.Snapshot(ctx, &r)
+			}
+			log.Printf("[shutdown] stopping container for %s...", r.Slug)
+			local := r
+			_ = m.stopAndRemove(ctx, &local, true)
+			_ = m.store.UpdateRouterState(ctx, r.ID, "stopped", "", "", "", "unknown")
+			// Preserve desired_state as running if the router was running so boot supervisor restarts it
+			if r.DesiredState == "running" || r.DesiredStatus == "running" {
+				_ = m.store.SetDesiredState(ctx, r.ID, "running")
+			}
+		}
+	}
 }
 
 // ReconcileAndStartAll starts only routers where desired_state or desired_status is "running".

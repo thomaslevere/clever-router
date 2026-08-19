@@ -459,6 +459,7 @@ func (p *Proxy) transformHTML(raw []byte, prefix, slug string) []byte {
 	htmlStr = strings.ReplaceAll(htmlStr, `href="/assets/`, fmt.Sprintf(`href="%s/assets/`, prefix))
 
 	// Rewrite common root-relative PWA/meta resources (manifest, icons, favicons, etc.)
+	// HTML attribute format: href="/manifest.webmanifest"
 	htmlStr = strings.ReplaceAll(htmlStr, `href="/manifest.webmanifest"`, fmt.Sprintf(`href="%s/manifest.webmanifest"`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `href="/manifest.json"`, fmt.Sprintf(`href="%s/manifest.json"`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `href="/favicon.ico"`, fmt.Sprintf(`href="%s/favicon.ico"`, prefix))
@@ -467,6 +468,29 @@ func (p *Proxy) transformHTML(raw []byte, prefix, slug string) []byte {
 	htmlStr = strings.ReplaceAll(htmlStr, `href="/apple-touch-icon`, fmt.Sprintf(`href="%s/apple-touch-icon`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `src="/favicon`, fmt.Sprintf(`src="%s/favicon`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `src="/icon-`, fmt.Sprintf(`src="%s/icon-`, prefix))
+
+	// RSC (React Server Components) JSON payload format.
+	// Next.js 14+ embeds metadata as nested JSON strings where quotes appear as \" (escaped).
+	// The actual bytes in the HTML are: \"href\":\"\/manifest.webmanifest\"
+	// We need to match both the unescaped and escaped variants.
+	// Unescaped JSON format: "href":"/manifest.webmanifest"
+	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/manifest.webmanifest"`, fmt.Sprintf(`"href":"%s/manifest.webmanifest"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/manifest.json"`, fmt.Sprintf(`"href":"%s/manifest.json"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/favicon.ico"`, fmt.Sprintf(`"href":"%s/favicon.ico"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/favicon.svg"`, fmt.Sprintf(`"href":"%s/favicon.svg"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/icon-`, fmt.Sprintf(`"href":"%s/icon-`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/apple-touch-icon`, fmt.Sprintf(`"href":"%s/apple-touch-icon`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"src":"/favicon`, fmt.Sprintf(`"src":"%s/favicon`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"src":"/icon-`, fmt.Sprintf(`"src":"%s/icon-`, prefix))
+	// Escaped JSON format (nested inside another JSON string): \"href\":\"/manifest.webmanifest\"
+	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/manifest.webmanifest\"`, fmt.Sprintf(`\"href\":\"%s/manifest.webmanifest\"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/manifest.json\"`, fmt.Sprintf(`\"href\":\"%s/manifest.json\"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/favicon.ico\"`, fmt.Sprintf(`\"href\":\"%s/favicon.ico\"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/favicon.svg\"`, fmt.Sprintf(`\"href\":\"%s/favicon.svg\"`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/icon-`, fmt.Sprintf(`\"href\":\"%s/icon-`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/apple-touch-icon`, fmt.Sprintf(`\"href\":\"%s/apple-touch-icon`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"src\":\"/favicon`, fmt.Sprintf(`\"src\":\"%s/favicon`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"src\":\"/icon-`, fmt.Sprintf(`\"src\":\"%s/icon-`, prefix))
 
 	// 3. Inject <base> tag and client-side history guard into <head>
 	clientGuardScript := fmt.Sprintf(`<base href="%s/" /><script>
@@ -479,8 +503,8 @@ window.__ROUTER_SLUG__ = "%s";
       window.__NEXT_DATA__.assetPrefix = "%s";
     }
   } catch(e){}
+  var p = "%s";
   if (typeof history !== "undefined") {
-    var p = "%s";
     var origPush = history.pushState;
     var origReplace = history.replaceState;
     history.pushState = function(state, title, url) {
@@ -494,6 +518,20 @@ window.__ROUTER_SLUG__ = "%s";
         url = p + url;
       }
       return origReplace.apply(this, [state, title, url]);
+    };
+  }
+  if (typeof window.fetch !== "undefined") {
+    var origFetch = window.fetch;
+    window.fetch = function(input, init) {
+      if (typeof input === "string" && input.startsWith("/") && !input.startsWith(p + "/") && !input.startsWith("/admin")) {
+        input = p + input;
+      } else if (input instanceof Request) {
+        var u = new URL(input.url);
+        if (u.pathname.startsWith("/") && !u.pathname.startsWith(p + "/") && !u.pathname.startsWith("/admin")) {
+          input = new Request(p + u.pathname + u.search + u.hash, input);
+        }
+      }
+      return origFetch.apply(this, [input, init]);
     };
   }
 })();

@@ -948,6 +948,24 @@ func hostPortFromURL(u string) string {
 	return s
 }
 
+func getDefaultGateway() string {
+	data, err := os.ReadFile("/proc/net/route")
+	if err != nil {
+		return "172.17.0.1"
+	}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines[1:] {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[1] == "00000000" { // Destination 0.0.0.0
+			var ip [4]byte
+			if n, _ := fmt.Sscanf(fields[2], "%02X%02X%02X%02X", &ip[3], &ip[2], &ip[1], &ip[0]); n == 4 {
+				return net.IPv4(ip[0], ip[1], ip[2], ip[3]).String()
+			}
+		}
+	}
+	return "172.17.0.1"
+}
+
 func (m *Manager) getCandidates(ctx context.Context, containerID string, port int) []string {
 	insp, err := m.docker.ContainerInspect(ctx, containerID)
 	if err != nil {
@@ -975,13 +993,14 @@ func (m *Manager) getCandidates(ctx context.Context, containerID string, port in
 	}
 
 	// 1. Published host ports (most reliable for Docker-socket sibling containers across isolated network namespaces)
+	hostGateways := []string{getDefaultGateway(), gatewayIP, "172.17.0.1", "127.0.0.1", "localhost", "host.docker.internal"}
 	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
 		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok {
 			for _, b := range bindings {
 				if b.HostPort != "" {
-					addCand(fmt.Sprintf("http://%s:%s", gatewayIP, b.HostPort))
-					addCand(fmt.Sprintf("http://127.0.0.1:%s", b.HostPort))
-					addCand(fmt.Sprintf("http://localhost:%s", b.HostPort))
+					for _, gw := range hostGateways {
+						addCand(fmt.Sprintf("http://%s:%s", gw, b.HostPort))
+					}
 				}
 			}
 		}
@@ -1141,16 +1160,25 @@ func countProviders(models []store.Model) int {
 func (m *Manager) checkAnyWorking(ctx context.Context, containerID string, port int, healthPath string) (string, bool) {
 	candidates := m.getCandidates(ctx, containerID, port)
 	probeClient := &http.Client{Timeout: 1500 * time.Millisecond}
+	paths := []string{healthPath}
+	if healthPath != "" && healthPath != "/" {
+		paths = append(paths, "/", "/login", "/v1/models")
+	}
 	for _, cand := range candidates {
-		url := strings.TrimRight(cand, "/") + healthPath
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if err == nil {
-			resp, err := probeClient.Do(req)
+		for _, p := range paths {
+			if p == "" {
+				continue
+			}
+			url := strings.TrimRight(cand, "/") + p
+			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 			if err == nil {
-				status := resp.StatusCode
-				resp.Body.Close()
-				if status < 500 {
-					return cand, true
+				resp, err := probeClient.Do(req)
+				if err == nil {
+					status := resp.StatusCode
+					resp.Body.Close()
+					if status < 500 {
+						return cand, true
+					}
 				}
 			}
 		}

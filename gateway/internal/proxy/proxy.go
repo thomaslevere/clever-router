@@ -65,15 +65,32 @@ type proxyError struct {
 	Error  string `json:"error"`
 }
 
-// HandleApp serves the web UI and dashboard of the container mounted under /app/:slug/*path
+// HandleApp serves the web UI and dashboard of the container mounted under /app/:slug/*path.
+// The /app/ prefix namespace is dedicated to serving native router dashboards and web UIs.
 func (p *Proxy) HandleApp(c *gin.Context) {
 	p.handleRequest(c, true)
 }
 
-// Handle serves OpenAI-compatible APIs and fallback routes under /:slug/*path
+// Handle serves OpenAI-compatible APIs and fallback routes under /:slug/*path.
+// This is the primary entry point for API traffic (e.g., /omnirouter/v1/chat/completions).
 func (p *Proxy) Handle(c *gin.Context) {
-	isApp := strings.HasPrefix(c.Request.URL.Path, "/app/") || c.Request.URL.Path == "/app"
-	p.handleRequest(c, isApp)
+	slug := c.Param("slug")
+
+	// Root path or empty slug: return clean service info instead of 502.
+	// This handles GET / (no matching router slug) and NoRoute fallback.
+	if slug == "" || (!p.table.Has(slug) && !isWebOrAssetPath(c.Request.URL.Path) && c.Request.URL.Path == "/"+slug) {
+		if slug == "" {
+			c.JSON(200, gin.H{
+				"service": "CleverRoute",
+				"status":  "ok",
+				"admin":   "/admin",
+				"docs":    "Use /:slug/v1/* to access router APIs",
+			})
+			return
+		}
+	}
+
+	p.handleRequest(c, false)
 }
 
 func (p *Proxy) handleRequest(c *gin.Context, isApp bool) {
@@ -84,8 +101,9 @@ func (p *Proxy) handleRequest(c *gin.Context, isApp bool) {
 	targetSlug := slug
 	upstreamPath := path
 
-	// Fallback routing for root-relative assets and sub-requests (e.g. /_next/*, /assets/*, /static/*, /api/*, /favicon.ico)
-	if !ok {
+	// Fallback routing for root-relative assets and sub-requests (e.g. /_next/*, /assets/*, /static/*, /favicon.ico).
+	// Only activate for known asset/sub-request paths — never for arbitrary unknown slugs.
+	if !ok && isWebOrAssetPath(c.Request.URL.Path) {
 		fallbackSlug, fallbackTarget := p.findFallbackRouter(c)
 		if fallbackTarget != "" {
 			targetSlug = fallbackSlug

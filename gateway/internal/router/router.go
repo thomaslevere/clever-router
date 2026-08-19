@@ -53,6 +53,14 @@ func (t *Table) Lookup(slug string) (target string, ok bool) {
 	return target, target != ""
 }
 
+// Has returns true if the slug exists in the routing table (even if not yet serving).
+func (t *Table) Has(slug string) bool {
+	t.mu.RLock()
+	_, ok := t.m[slug]
+	t.mu.RUnlock()
+	return ok
+}
+
 // Snapshot returns a copy of the table.
 func (t *Table) Snapshot() map[string]string {
 	t.mu.RLock()

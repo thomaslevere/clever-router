@@ -445,11 +445,8 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		if cands := m.getCandidates(ctx, created.ID, ad.InternalPort(r)); len(cands) > 0 {
 			fallbackAddr = cands[0]
 		}
-		endpoint := r.EndpointPath
-		if endpoint == "" {
-			endpoint = "/" + r.Slug
-		}
-		panel := endpoint + ad.NativePanelPath(r)
+		// Use consistent /app/:slug format for panel URL (same as the healthy branch below)
+		panel := fmt.Sprintf("/app/%s%s", r.Slug, ad.NativePanelPath(r))
 		_ = m.store.UpdateRouterState(ctx, r.ID, "unhealthy", fallbackAddr, created.ID, panel, "unhealthy")
 		_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
 		m.emitEvent(r.ID, "state_changed", map[string]any{

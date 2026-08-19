@@ -179,7 +179,10 @@ func (a *API) Register(r *gin.Engine) {
 	r.Any("/app/:slug/*path", p.HandleApp)
 	r.Any("/:slug", p.Handle)
 	r.Any("/:slug/*path", p.Handle)
-	r.NoRoute(p.Handle)
+	// NOTE: No r.NoRoute() catch-all here. The /:slug/*path route already catches
+	// all legitimate router paths. A NoRoute handler would hijack unrelated paths
+	// (/, /favicon.ico, etc.) and route them to the proxy with an empty slug,
+	// producing confusing "router '' is not serving" errors.
 }
 
 // adminRoot routes /admin/api/* to the private REST engine and everything else

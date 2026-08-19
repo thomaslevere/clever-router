@@ -93,10 +93,11 @@ func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []stri
 	envMap["NODE_ENV"] = "production"
 	envMap["PORT"] = port
 	envMap["DATA_DIR"] = dataPath
-	envMap["BASE_PATH"] = "/app/" + r.Slug
-	envMap["PUBLIC_URL"] = "/app/" + r.Slug
-	envMap["PREFIX"] = "/app/" + r.Slug
-	envMap["BASE_URL"] = "/app/" + r.Slug
+	// NOTE: Do NOT inject BASE_PATH/PREFIX/PUBLIC_URL/BASE_URL here.
+	// OmniRoute is a pre-built Next.js standalone server that ignores runtime
+	// base path changes (basePath is compiled into next.config.js at build time).
+	// Injecting these causes startup crashes. The reverse proxy layer handles
+	// all subpath rewriting transparently.
 
 	// 2. Legacy router config["env"] (map) if present
 	if cfgEnv, ok := r.Config["env"].(map[string]any); ok {

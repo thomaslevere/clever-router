@@ -115,14 +115,25 @@ export const api = {
   },
 };
 
-export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: string; native_panel_url?: string }): string {
+export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: string; native_panel_url?: string; adapter_type?: string }): string {
   if (typeof window === "undefined") return "";
   const token = getToken();
   const slug = router.slug || (router.endpoint_path ? router.endpoint_path.replace(/^\//, "") : "");
-
   const base = window.location.origin;
-  const url = new URL(`/${slug}/open`, base);
-  if (token) {
+
+  let targetPath = `/${slug}/open`;
+  if (router.native_panel_url && router.native_panel_url.trim() !== "" && router.native_panel_url !== "/dashboard") {
+    targetPath = router.native_panel_url.startsWith("http")
+      ? router.native_panel_url
+      : router.native_panel_url.startsWith("/")
+      ? router.native_panel_url
+      : `/${router.native_panel_url}`;
+  } else if (router.adapter_type === "litellm" || slug.toLowerCase().includes("litellm")) {
+    targetPath = `/${slug}/ui/`;
+  }
+
+  const url = targetPath.startsWith("http") ? new URL(targetPath) : new URL(targetPath, base);
+  if (token && !url.searchParams.has("token")) {
     url.searchParams.set("token", token);
   }
   return url.toString();

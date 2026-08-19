@@ -137,11 +137,17 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 		if cleanPath == "open" || cleanPath == "dashboard" || cleanPath == "login" || cleanPath == "" {
 			c.SetCookie("cr_active_router", targetSlug, 86400*7, "/", "", false, false)
 			dest := "/dashboard"
-			if cleanPath == "login" {
+			if strings.EqualFold(targetSlug, "litellm") || strings.Contains(strings.ToLower(targetSlug), "litellm") {
+				dest = fmt.Sprintf("/%s/ui/", targetSlug)
+			} else if cleanPath == "login" {
 				dest = "/login"
 			}
 			if c.Request.URL.RawQuery != "" {
-				dest += "?" + c.Request.URL.RawQuery
+				if strings.Contains(dest, "?") {
+					dest += "&" + c.Request.URL.RawQuery
+				} else {
+					dest += "?" + c.Request.URL.RawQuery
+				}
 			}
 			c.Redirect(http.StatusFound, dest)
 			return

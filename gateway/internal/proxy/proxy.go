@@ -129,6 +129,19 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 		return
 	}
 
+	// Automatic redirect from /dashboard to / when active router is FreeLLMAPI or 9Router (they do not have a /dashboard page)
+	if isRootProxy && c.Request.Method == "GET" && (c.Request.URL.Path == "/dashboard" || c.Request.URL.Path == "/dashboard/") {
+		low := strings.ToLower(targetSlug)
+		if strings.Contains(low, "freellm") || strings.Contains(low, "9router") {
+			dest := "/"
+			if c.Request.URL.RawQuery != "" {
+				dest += "?" + c.Request.URL.RawQuery
+			}
+			c.Redirect(http.StatusFound, dest)
+			return
+		}
+	}
+
 	// 2. Direct Web UI Activation & Redirection (for single-domain mode)
 	// When user visits /:slug/open, /:slug/dashboard, or /:slug/login directly in browser:
 	// Set the active router cookie and redirect to root /dashboard or /login for 100% native Next.js App Router execution.
@@ -137,8 +150,15 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 		if cleanPath == "open" || cleanPath == "dashboard" || cleanPath == "login" || cleanPath == "" {
 			c.SetCookie("cr_active_router", targetSlug, 86400*7, "/", "", false, false)
 			dest := "/dashboard"
-			if strings.EqualFold(targetSlug, "litellm") || strings.Contains(strings.ToLower(targetSlug), "litellm") {
+			low := strings.ToLower(targetSlug)
+			if strings.Contains(low, "litellm") {
 				dest = fmt.Sprintf("/%s/ui/", targetSlug)
+			} else if strings.Contains(low, "freellm") || strings.Contains(low, "9router") {
+				if cleanPath == "login" {
+					dest = "/login"
+				} else {
+					dest = "/"
+				}
 			} else if cleanPath == "login" {
 				dest = "/login"
 			}

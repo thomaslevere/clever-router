@@ -489,6 +489,8 @@ func (a *API) createRouter(c *gin.Context) {
 			imageRef = "calciumion/new-api:latest"
 		case "portkey":
 			imageRef = "portkeyai/gateway:latest"
+		case "bifrost":
+			imageRef = "maximhq/bifrost:latest"
 		default:
 			imageRef = "diegosouzapw/omniroute:latest"
 		}

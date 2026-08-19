@@ -6,6 +6,7 @@ import type { Router } from "../lib/types";
 
 const adapters = [
   { value: "omniroute", label: "OmniRoute", image: "diegosouzapw/omniroute:latest" },
+  { value: "bifrost", label: "Bifrost (Maxim AI)", image: "maximhq/bifrost:latest" },
   { value: "new-api", label: "New-API (QuantumNous)", image: "calciumion/new-api:latest" },
   { value: "portkey", label: "Portkey AI Gateway", image: "portkeyai/gateway:latest" },
   { value: "litellm", label: "LiteLLM", image: "ghcr.io/berriai/litellm:main-stable" },
@@ -40,8 +41,8 @@ export default function AddRouterModal({
       ...f,
       adapter_type: v,
       image_ref: a.image || f.image_ref,
-      slug: f.slug === "" || ["omniroute", "new-api", "portkey", "9router", "freellmapi", "litellm"].includes(f.slug) ? v : f.slug,
-      endpoint_path: f.endpoint_path === "" || ["/omniroute", "/new-api", "/portkey", "/9router", "/freellmapi", "/litellm", "/omniroute/v1", "/new-api/v1", "/portkey/v1", "/9router/v1", "/freellmapi/v1", "/litellm/v1"].includes(f.endpoint_path) ? `/${v}` : f.endpoint_path,
+      slug: f.slug === "" || ["omniroute", "bifrost", "new-api", "portkey", "9router", "freellmapi", "litellm"].includes(f.slug) ? v : f.slug,
+      endpoint_path: f.endpoint_path === "" || ["/omniroute", "/bifrost", "/new-api", "/portkey", "/9router", "/freellmapi", "/litellm", "/omniroute/v1", "/bifrost/v1", "/new-api/v1", "/portkey/v1", "/9router/v1", "/freellmapi/v1", "/litellm/v1"].includes(f.endpoint_path) ? `/${v}` : f.endpoint_path,
     }));
   }
 

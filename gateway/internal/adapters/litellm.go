@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -167,7 +168,19 @@ func (LiteLLMAdapter) Env(r *store.Router, decrypted map[string]string) []string
 		envMap[upperProv] = key
 	}
 
-	// 5. Convert to []string formatted as "KEY=VALUE"
+	// 5. Inject default DATABASE_URL from host PostgreSQL addon if not provided by user
+	if _, exists := envMap["DATABASE_URL"]; !exists {
+		hostPG := os.Getenv("POSTGRESQL_ADDON_URI")
+		if hostPG == "" {
+			hostPG = os.Getenv("DATABASE_URL")
+		}
+		if hostPG != "" && strings.HasPrefix(hostPG, "postgres") {
+			envMap["DATABASE_URL"] = hostPG
+			envMap["STORE_MODEL_IN_DB"] = "True"
+		}
+	}
+
+	// 6. Convert to []string formatted as "KEY=VALUE"
 	finalEnv := make([]string, 0, len(envMap))
 	for k, v := range envMap {
 		finalEnv = append(finalEnv, fmt.Sprintf("%s=%s", k, v))

@@ -150,35 +150,37 @@ func (m *Manager) Close() error {
 // they are isolated from each other and from the host, but reachable from the
 // gateway process via Docker bridge IPs.
 func (m *Manager) ensureNetwork(ctx context.Context) error {
-	// Check if network already exists.
 	nets, err := m.docker.NetworkList(ctx, dockertypes.NetworkListOptions{
 		Filters: filters.NewArgs(filters.Arg("name", networkName)),
 	})
 	if err != nil {
 		return fmt.Errorf("list networks: %w", err)
 	}
+	exists := false
 	for _, n := range nets {
 		if n.Name == networkName {
-			return nil // already present
+			exists = true
+			break
 		}
 	}
-	// Create the network. In Docker SDK v27 CheckDuplicate was removed from
-	// CreateOptions (it defaults to true server-side since API v1.44).
-	_, err = m.docker.NetworkCreate(ctx, networkName, network.CreateOptions{
-		Driver: "bridge",
-		Labels: map[string]string{
-			"app":        "clever-route",
-			"managed-by": "clever-route",
-		},
-	})
-	if err != nil {
-		// Treat "already exists" as a no-op (harmless race on first startup).
-		if strings.Contains(err.Error(), "already exists") {
-			return nil
+	if !exists {
+		_, err = m.docker.NetworkCreate(ctx, networkName, network.CreateOptions{
+			Driver: "bridge",
+			Labels: map[string]string{
+				"app":        "clever-route",
+				"managed-by": "clever-route",
+			},
+		})
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
+			return fmt.Errorf("create network %q: %w", networkName, err)
 		}
-		return fmt.Errorf("create network %q: %w", networkName, err)
+		log.Printf("[manager] created docker network %q", networkName)
 	}
-	log.Printf("[manager] created docker network %q", networkName)
+
+	// Connect current gateway process container to networkName so container DNS and bridge routing work
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		_ = m.docker.NetworkConnect(ctx, networkName, hostname, nil)
+	}
 	return nil
 }
 
@@ -393,7 +395,8 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 	}
 	netCfg := &network.NetworkingConfig{
 		EndpointsConfig: map[string]*network.EndpointSettings{
-			"bridge": {},
+			networkName: {},
+			"bridge":    {},
 		},
 	}
 
@@ -990,6 +993,12 @@ func (m *Manager) getCandidates(ctx context.Context, containerID string, port in
 			seen[c] = true
 			candidates = append(candidates, c)
 		}
+	}
+
+	// 0. Container Name DNS (fastest and cleanest across user-defined bridge network)
+	cleanName := strings.TrimPrefix(insp.Name, "/")
+	if cleanName != "" {
+		addCand(fmt.Sprintf("http://%s:%d", cleanName, port))
 	}
 
 	// 1. Published host ports (most reliable for Docker-socket sibling containers across isolated network namespaces)

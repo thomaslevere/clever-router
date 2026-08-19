@@ -122,14 +122,16 @@ export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: strin
   const base = window.location.origin;
 
   let targetPath = `/${slug}/open`;
-  if (router.native_panel_url && router.native_panel_url.trim() !== "" && router.native_panel_url !== "/dashboard") {
+  if (router.adapter_type === "portkey" || slug.toLowerCase().includes("portkey")) {
+    targetPath = `/${slug}/v1/models`;
+  } else if (router.adapter_type === "litellm" || slug.toLowerCase().includes("litellm")) {
+    targetPath = `/${slug}/ui/`;
+  } else if (router.native_panel_url && router.native_panel_url.trim() !== "" && router.native_panel_url !== "/dashboard") {
     targetPath = router.native_panel_url.startsWith("http")
       ? router.native_panel_url
       : router.native_panel_url.startsWith("/")
       ? router.native_panel_url
       : `/${router.native_panel_url}`;
-  } else if (router.adapter_type === "litellm" || slug.toLowerCase().includes("litellm")) {
-    targetPath = `/${slug}/ui/`;
   }
 
   const url = targetPath.startsWith("http") ? new URL(targetPath) : new URL(targetPath, base);

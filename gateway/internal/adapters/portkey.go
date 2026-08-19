@@ -30,12 +30,12 @@ func (PortkeyAdapter) InternalPort(r *store.Router) int {
 	return 8787
 }
 
-// HealthPath probes Portkey's /healthz endpoint which returns 200 OK without authentication.
+// HealthPath probes Portkey's /v1/models endpoint which verifies the Hono router is active.
 func (PortkeyAdapter) HealthPath(r *store.Router) string {
 	if p := strConfig(r, "health_path"); p != "" {
 		return p
 	}
-	return "/healthz"
+	return "/v1/models"
 }
 
 // ModelsPath is the OpenAI-compatible model listing endpoint.
@@ -50,7 +50,7 @@ func (PortkeyAdapter) NativePanelPath(r *store.Router) string {
 	if p := strConfig(r, "native_panel_path"); p != "" {
 		return p
 	}
-	return "/healthz"
+	return "/v1/models"
 }
 
 func (PortkeyAdapter) DeclaredVolumes(r *store.Router) []string {

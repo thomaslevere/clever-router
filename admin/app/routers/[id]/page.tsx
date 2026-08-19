@@ -242,7 +242,9 @@ export default function RouterDetailPage() {
               )}
               {(panelUrl || realtime.nativePanelUrl) && (
                 <div className="flex items-center gap-2 flex-wrap pt-1">
-                  <span className="font-medium text-slate-600 dark:text-slate-300">Native Dashboard:</span>
+                  <span className="font-medium text-slate-600 dark:text-slate-300">
+                    {r.adapter_type === "portkey" ? "Gateway API:" : "Native Dashboard:"}
+                  </span>
                   {isRunning || currentRuntime === "running" ? (
                     <>
                       <a
@@ -251,7 +253,7 @@ export default function RouterDetailPage() {
                         rel="noreferrer"
                         href={panelUrl || realtime.nativePanelUrl}
                       >
-                        <span>Open Native Panel ↗</span>
+                        <span>{r.adapter_type === "portkey" ? "Open Gateway API ↗" : "Open Native Panel ↗"}</span>
                       </a>
                       <button
                         type="button"

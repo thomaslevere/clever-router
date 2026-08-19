@@ -802,17 +802,31 @@ func (a *API) getInitialPassword(c *gin.Context) {
 	}
 
 	password := ""
+	encryptionKey := ""
+	setupCode := ""
+
 	for _, ev := range r.EnvVars {
-		if strings.TrimSpace(ev.Key) == "INITIAL_PASSWORD" {
-			val := ev.Value
-			if ev.IsSecret && secrets.IsEncrypted(val) {
-				if dec, err := secrets.DecryptValue(a.box, val); err == nil {
-					password = dec
-				}
-			} else {
-				password = val
+		key := strings.TrimSpace(ev.Key)
+		val := ev.Value
+		if ev.IsSecret && secrets.IsEncrypted(val) {
+			if dec, err := secrets.DecryptValue(a.box, val); err == nil {
+				val = dec
 			}
-			break
+		}
+		if key == "INITIAL_PASSWORD" {
+			password = val
+		} else if key == "ENCRYPTION_KEY" {
+			encryptionKey = val
+		} else if key == "SETUP_CODE" || key == "SETUP_KEY" {
+			setupCode = val
+		}
+	}
+
+	if password == "" {
+		if encryptionKey != "" {
+			password = encryptionKey
+		} else if setupCode != "" {
+			password = setupCode
 		}
 	}
 
@@ -826,6 +840,8 @@ func (a *API) getInitialPassword(c *gin.Context) {
 
 	c.JSON(200, gin.H{
 		"initial_password": password,
+		"encryption_key":   encryptionKey,
+		"setup_code":       setupCode,
 		"is_default":       isDefault,
 		"adapter_type":     r.AdapterType,
 	})

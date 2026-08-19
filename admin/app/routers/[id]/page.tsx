@@ -332,8 +332,8 @@ export default function RouterDetailPage() {
         </div>
       )}
 
-      {/* Native Dashboard Credentials & Factory Reset Banner for OmniRoute and 9Router */}
-      {(r.adapter_type === "omniroute" || r.adapter_type === "9router") && (
+      {/* Native Dashboard Credentials & Factory Reset Banner */}
+      {(initialPassword || r.adapter_type === "omniroute" || r.adapter_type === "9router" || r.adapter_type === "freellmapi") && (
         <div className={`card p-4 shadow-sm border ${
           initialPassword
             ? "bg-amber-500/5 dark:bg-amber-500/10 border-amber-500/20"
@@ -350,11 +350,13 @@ export default function RouterDetailPage() {
                 <div className={`text-xs font-bold uppercase tracking-wider ${
                   initialPassword ? "text-amber-900 dark:text-amber-200" : "text-brand font-semibold"
                 }`}>
-                  {initialPassword ? "Native Dashboard Login Credentials" : "Initial Setup Wizard Ready"}
+                  {r.adapter_type === "freellmapi"
+                    ? "FreeLLMAPI Setup Code / Encryption Key"
+                    : (initialPassword ? "Native Dashboard Login Credentials" : "Initial Setup Wizard Ready")}
                 </div>
                 {initialPassword ? (
                   <div className="flex items-center gap-2 mt-0.5 text-xs text-slate-600 dark:text-slate-300 flex-wrap">
-                    <span>Initial Admin Password:</span>
+                    <span>{r.adapter_type === "freellmapi" ? "Setup Code / Encryption Key:" : "Initial Admin Password:"}</span>
                     <code className="px-2 py-0.5 rounded bg-black/5 dark:bg-white/10 font-mono font-bold text-amber-600 dark:text-amber-400 text-xs border border-amber-500/30 select-all">
                       {initialPassword}
                     </code>

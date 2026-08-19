@@ -46,12 +46,12 @@ func (FreeLLMAPIAdapter) ModelsPath(r *store.Router) string {
 	return "/v1/models"
 }
 
-// NativePanelPath returns "" because FreeLLMAPI is a pure headless API bridge without a web GUI.
+// NativePanelPath returns "/" for the FreeLLMAPI web dashboard.
 func (FreeLLMAPIAdapter) NativePanelPath(r *store.Router) string {
 	if p := strConfig(r, "native_panel_path"); p != "" {
 		return p
 	}
-	return ""
+	return "/"
 }
 
 func (FreeLLMAPIAdapter) DeclaredVolumes(r *store.Router) []string {

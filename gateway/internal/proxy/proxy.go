@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -287,10 +286,28 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 	}
 	defer resp.Body.Close()
 
+	sc := newUsageScanner(model)
+	flusher, _ := c.Writer.(http.Flusher)
+
+	// Detect HTML early so we can skip encoding-related headers during copy.
+	// When we transform HTML, the original Content-Length and Content-Encoding
+	// become stale. We must NOT forward them or edge proxies (Sozu/Clever Cloud)
+	// will create a mismatch between the declared and actual body encoding.
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	isHTML := strings.Contains(contentType, "text/html")
+
 	// Flush and rewrite upstream headers to client.
 	for k, vs := range resp.Header {
 		if isHop(k) {
 			continue
+		}
+		// For HTML responses we rewrite the body, so skip headers that describe
+		// the upstream body encoding — we'll write our own uncompressed body.
+		if isHTML {
+			kl := strings.ToLower(k)
+			if kl == "content-encoding" || kl == "content-length" || kl == "transfer-encoding" {
+				continue
+			}
 		}
 		// Location header rewriting for 30x redirects
 		if strings.EqualFold(k, "Location") {
@@ -309,15 +326,8 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 		c.Writer.Header().Set("X-CleverRoute-Model", model)
 	}
 
-	sc := newUsageScanner(model)
-	flusher, _ := c.Writer.(http.Flusher)
-
 	// HTML Content: Transform Next.js routing metadata, asset paths, and inject <base> guard
-	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	if strings.Contains(contentType, "text/html") {
-		// Strip Content-Encoding since we are transforming and writing uncompressed HTML
-		c.Writer.Header().Del("Content-Encoding")
-
+	if isHTML {
 		var bodyReader io.Reader = resp.Body
 		if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
 			if gzReader, err := gzip.NewReader(resp.Body); err == nil {
@@ -329,7 +339,9 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 		rawHTML, err := io.ReadAll(bodyReader)
 		if err == nil {
 			modifiedHTML := p.transformHTML(rawHTML, prefix, targetSlug)
-			c.Writer.Header().Set("Content-Length", strconv.Itoa(len(modifiedHTML)))
+			// Do NOT set Content-Length here. Edge proxies (Sozu) may re-compress
+			// the response, which would invalidate any Content-Length we set.
+			// Let the HTTP stack use chunked transfer encoding instead.
 			c.Writer.WriteHeader(resp.StatusCode)
 			_, _ = c.Writer.Write(modifiedHTML)
 			if flusher != nil {

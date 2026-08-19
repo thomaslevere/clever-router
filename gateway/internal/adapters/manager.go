@@ -782,11 +782,24 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 	if err != nil {
 		return err
 	}
+
+	// 1. Inspect Docker container if containerID or targetAddr is missing or needs rediscovery
+	cName := containerPrefix + r.Slug
+	if cInspect, err := m.docker.ContainerInspect(ctx, cName); err == nil && cInspect.State != nil && cInspect.State.Running {
+		r.ContainerID = cInspect.ID
+		if workingAddr, ok := m.checkAnyWorking(ctx, cInspect.ID, ad.InternalPort(r), ad.HealthPath(r)); ok {
+			r.TargetAddr = workingAddr
+		}
+	}
+
 	if r.TargetAddr == "" {
 		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", 0, "no target address")
+		_ = m.store.UpdateRouterState(ctx, r.ID, "stopped", "", "", "", "unknown")
+		m.table.Delete(r.Slug)
 		m.emitEvent(r.ID, "state_changed", map[string]any{
-			"health_status": "unhealthy",
-			"runtime_state": r.RuntimeState,
+			"status":        "stopped",
+			"health_status": "unknown",
+			"runtime_state": "stopped",
 			"slug":          r.Slug,
 		})
 		return fmt.Errorf("no target address")
@@ -824,29 +837,37 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 		if newWorkingAddr, ok := m.checkAnyWorking(ctx, r.ContainerID, ad.InternalPort(r), ad.HealthPath(r)); ok {
 			targetAddr = newWorkingAddr
 			probeErr = nil
-			_ = m.store.UpdateRouterState(ctx, r.ID, r.RuntimeState, newWorkingAddr, r.ContainerID, r.NativePanelURL, "healthy")
-			_ = m.cache.SetRoute(ctx, r.Slug, newWorkingAddr)
-			m.table.Set(r.Slug, newWorkingAddr)
 		}
 	}
 
 	if probeErr != nil {
 		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", int(latency), probeErr.Error())
-		_ = m.store.UpdateRouterState(ctx, r.ID, r.RuntimeState, r.TargetAddr, r.ContainerID, r.NativePanelURL, "unhealthy")
+		_ = m.store.UpdateRouterState(ctx, r.ID, "unhealthy", r.TargetAddr, r.ContainerID, r.NativePanelURL, "unhealthy")
+		m.table.Delete(r.Slug)
 		m.emitEvent(r.ID, "state_changed", map[string]any{
+			"status":        "unhealthy",
 			"health_status": "unhealthy",
-			"runtime_state": r.RuntimeState,
+			"runtime_state": "unhealthy",
 			"slug":          r.Slug,
 		})
 		return probeErr
 	}
 
 	_ = m.store.InsertHealthCheck(ctx, r.ID, "healthy", int(latency), "")
-	_ = m.store.UpdateRouterState(ctx, r.ID, r.RuntimeState, targetAddr, r.ContainerID, r.NativePanelURL, "healthy")
+	panel := fmt.Sprintf("/%s%s", r.Slug, ad.NativePanelPath(r))
+	_ = m.store.UpdateRouterState(ctx, r.ID, "running", targetAddr, r.ContainerID, panel, "healthy")
+	_ = m.store.SetDesiredState(ctx, r.ID, "running")
+	_ = m.cache.SetRoute(ctx, r.Slug, targetAddr)
+	m.table.Set(r.Slug, targetAddr)
+
 	m.emitEvent(r.ID, "state_changed", map[string]any{
-		"health_status": "healthy",
-		"runtime_state": r.RuntimeState,
-		"slug":          r.Slug,
+		"status":           "running",
+		"health_status":    "healthy",
+		"runtime_state":    "running",
+		"desired_state":    "running",
+		"target_addr":      targetAddr,
+		"native_panel_url": panel,
+		"slug":             r.Slug,
 	})
 	return nil
 }

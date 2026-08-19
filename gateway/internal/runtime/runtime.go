@@ -95,16 +95,10 @@ func (c *Checker) tick(ctx context.Context) {
 		return
 	}
 	for _, r := range routers {
-		if r.RuntimeState != "running" && r.RuntimeState != "unhealthy" {
-			continue
-		}
-		if r.TargetAddr == "" {
-			continue
-		}
 		go func(r store.Router) {
 			if err := c.manager.HealthCheck(ctx, &r); err != nil {
-				log.Printf("[health] %s: %v", r.Slug, err)
-			} else if r.RuntimeState == "running" {
+				// failed health check is logged in manager
+			} else {
 				_ = c.manager.Snapshot(ctx, &r)
 			}
 		}(r)

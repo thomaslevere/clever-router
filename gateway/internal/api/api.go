@@ -373,10 +373,20 @@ func (a *API) adminUI(c *gin.Context) {
 
 func (a *API) findRouter(ctx context.Context, idOrSlug string) (*store.Router, error) {
 	r, err := a.store.GetRouter(ctx, idOrSlug)
-	if err == nil && r != nil {
-		return r, nil
+	if err != nil || r == nil {
+		r, err = a.store.GetRouterBySlug(ctx, idOrSlug)
 	}
-	return a.store.GetRouterBySlug(ctx, idOrSlug)
+	if err != nil || r == nil {
+		return nil, err
+	}
+	if target, ok := a.table.Lookup(r.Slug); ok && target != "" {
+		r.TargetAddr = target
+		r.RuntimeState = "running"
+		if r.HealthStatus == "unknown" || r.HealthStatus == "stopped" {
+			r.HealthStatus = "healthy"
+		}
+	}
+	return r, nil
 }
 
 func maskRouterSecrets(r *store.Router) store.Router {
@@ -420,6 +430,13 @@ func (a *API) listRouters(c *gin.Context) {
 	}
 	out := make([]store.Router, len(rs))
 	for i, r := range rs {
+		if target, ok := a.table.Lookup(r.Slug); ok && target != "" {
+			r.TargetAddr = target
+			r.RuntimeState = "running"
+			if r.HealthStatus == "unknown" || r.HealthStatus == "stopped" {
+				r.HealthStatus = "healthy"
+			}
+		}
 		out[i] = maskRouterSecrets(&r)
 	}
 	c.JSON(200, out)

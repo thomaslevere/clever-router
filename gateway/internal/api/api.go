@@ -760,7 +760,7 @@ func (a *API) startRouter(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
 	}
-	_ = a.store.SetDesiredState(c, r.ID, "running")
+	_ = a.store.SetDesiredState(context.Background(), r.ID, "running")
 	go func(target store.Router) {
 		defer func() {
 			if rec := recover(); rec != nil {

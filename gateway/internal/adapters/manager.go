@@ -465,6 +465,7 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 	if err := m.store.UpdateRouterState(ctx, r.ID, "running", workingAddr, created.ID, panel, "healthy"); err != nil {
 		return err
 	}
+	_ = m.store.SetDesiredState(context.Background(), r.ID, "running")
 	if err := m.cache.SetRoute(ctx, r.Slug, workingAddr); err != nil {
 		return err
 	}

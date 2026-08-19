@@ -136,10 +136,10 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 		return
 	}
 
-	// Automatic redirect from /dashboard to / when active router is FreeLLMAPI or 9Router (they do not have a /dashboard page)
+	// Automatic redirect from /dashboard to / only for FreeLLMAPI (which has its SPA at root and no /dashboard page)
 	if isRootProxy && c.Request.Method == "GET" && (c.Request.URL.Path == "/dashboard" || c.Request.URL.Path == "/dashboard/") {
 		low := strings.ToLower(targetSlug)
-		if strings.Contains(low, "freellm") || strings.Contains(low, "9router") {
+		if strings.Contains(low, "freellm") {
 			dest := "/"
 			if c.Request.URL.RawQuery != "" {
 				dest += "?" + c.Request.URL.RawQuery
@@ -160,7 +160,7 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 			low := strings.ToLower(targetSlug)
 			if strings.Contains(low, "litellm") {
 				dest = fmt.Sprintf("/%s/ui/", targetSlug)
-			} else if strings.Contains(low, "freellm") || strings.Contains(low, "9router") {
+			} else if strings.Contains(low, "freellm") {
 				if cleanPath == "login" {
 					dest = "/login"
 				} else {

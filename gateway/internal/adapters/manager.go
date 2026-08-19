@@ -190,7 +190,8 @@ func (m *Manager) imageAllowed(ref string) bool {
 	if strings.Contains(clean, "omniroute") ||
 		strings.Contains(clean, "9router") ||
 		strings.Contains(clean, "freellmapi") ||
-		strings.Contains(clean, "litellm") {
+		strings.Contains(clean, "litellm") ||
+		strings.Contains(clean, "coai") {
 		return true
 	}
 	return m.allowed[ref] || m.allowed[shortRef(ref)] || m.allowed[clean]
@@ -856,6 +857,13 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 				{RouterID: r.ID, ModelID: "deepseek-chat", Provider: "deepseek", Modalities: "chat"},
 			}
 		case "bifrost":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "deepseek-chat", Provider: "deepseek", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "gemini-1.5-pro", Provider: "gemini", Modalities: "chat"},
+			}
+		case "coai":
 			models = []store.Model{
 				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
 				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},

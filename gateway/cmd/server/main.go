@@ -79,8 +79,8 @@ func main() {
 		log.Println("S3 FastVolumeBridge disabled (no Cellar/S3 credentials configured; using local disk volumes)")
 	}
 
-	// Adapter registry (OmniRoute + 9Router + FreeLLMAPI + LiteLLM + New-API + Portkey + Bifrost)
-	reg := adapters.NewRegistry(adapters.OmniRouteAdapter{}, adapters.NineRouterAdapter{}, adapters.FreeLLMAPIAdapter{}, adapters.LiteLLMAdapter{}, adapters.NewApiAdapter{}, adapters.PortkeyAdapter{}, adapters.BifrostAdapter{})
+	// Adapter registry (OmniRoute + 9Router + FreeLLMAPI + LiteLLM + New-API + Portkey + Bifrost + CoAI)
+	reg := adapters.NewRegistry(adapters.OmniRouteAdapter{}, adapters.NineRouterAdapter{}, adapters.FreeLLMAPIAdapter{}, adapters.LiteLLMAdapter{}, adapters.NewApiAdapter{}, adapters.PortkeyAdapter{}, adapters.BifrostAdapter{}, adapters.CoAIAdapter{})
 
 	// Hot routing table, seeded from Redis
 	table := router.NewTable(c)

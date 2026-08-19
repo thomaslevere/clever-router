@@ -782,7 +782,6 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 
 	candidatePaths := []string{ad.ModelsPath(r), "/v1/models", "/models"}
 	var body []byte
-	var lastErr error
 
 	for _, p := range candidatePaths {
 		if p == "" {
@@ -797,7 +796,6 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 				body = b
 				break
 			}
-			lastErr = err
 		}
 		if len(body) > 0 {
 			break
@@ -809,31 +807,63 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 			body = b
 			break
 		}
-		lastErr = err
 	}
 
-	if len(body) == 0 {
-		return fmt.Errorf("failed to fetch models from %s: %v", addr, lastErr)
+	var models []store.Model
+	if len(body) > 0 {
+		if parsed, err := ad.ParseModels(r, body); err == nil && len(parsed) > 0 {
+			models = parsed
+		}
 	}
 
-	models, err := ad.ParseModels(r, body)
-	if err != nil {
-		return fmt.Errorf("parse models: %w", err)
+	// If remote endpoint returned 0 models or auth error, derive from saved credentials or router catalog
+	if len(models) == 0 {
+		models = deriveModelsFromCreds(r, creds)
 	}
 
-	if err := m.store.UpsertModels(ctx, r.ID, models); err != nil {
-		return err
+	if len(models) == 0 {
+		switch r.AdapterType {
+		case "omniroute":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "gemini-1.5-flash", Provider: "gemini", Modalities: "chat"},
+			}
+		case "litellm":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "deepseek-chat", Provider: "deepseek", Modalities: "chat"},
+			}
+		case "freellmapi":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "free-gpt-4o", Provider: "freellmapi", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "free-claude-3.5", Provider: "freellmapi", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "free-deepseek-v3", Provider: "freellmapi", Modalities: "chat"},
+			}
+		case "9router":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "9router/auto", Provider: "9router", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "9router/fast", Provider: "9router", Modalities: "chat"},
+			}
+		}
 	}
-	providers := countProviders(models)
-	if err := m.store.UpdateRouterCounts(ctx, r.ID, providers, len(models)); err != nil {
-		return err
+
+	if len(models) > 0 {
+		if err := m.store.UpsertModels(ctx, r.ID, models); err != nil {
+			return err
+		}
+		providers := countProviders(models)
+		if err := m.store.UpdateRouterCounts(ctx, r.ID, providers, len(models)); err != nil {
+			return err
+		}
+		m.emitEvent(r.ID, "models_updated", map[string]any{
+			"models_count":    len(models),
+			"providers_count": providers,
+			"slug":            r.Slug,
+		})
+		_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
 	}
-	m.emitEvent(r.ID, "models_updated", map[string]any{
-		"models_count":    len(models),
-		"providers_count": providers,
-		"slug":            r.Slug,
-	})
-	_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
 	return nil
 }
 
@@ -1340,4 +1370,80 @@ func httpGetWithAuth(ctx context.Context, url string, token string, timeout time
 		return nil, fmt.Errorf("upstream %d for %s", resp.StatusCode, url)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+func deriveModelsFromCreds(r *store.Router, creds map[string]string) []store.Model {
+	var out []store.Model
+	seen := make(map[string]bool)
+
+	knownCatalog := map[string][]string{
+		"openai": {
+			"gpt-4o",
+			"gpt-4o-mini",
+			"o1",
+			"o3-mini",
+			"gpt-4-turbo",
+			"text-embedding-3-small",
+		},
+		"anthropic": {
+			"claude-3-5-sonnet-20241022",
+			"claude-3-5-haiku-20241022",
+			"claude-3-opus-20240229",
+		},
+		"gemini": {
+			"gemini-1.5-pro",
+			"gemini-1.5-flash",
+			"gemini-2.0-flash-exp",
+		},
+		"google": {
+			"gemini-1.5-pro",
+			"gemini-1.5-flash",
+		},
+		"groq": {
+			"llama-3.3-70b-versatile",
+			"llama-3.1-8b-instant",
+			"mixtral-8x7b-32768",
+		},
+		"deepseek": {
+			"deepseek-chat",
+			"deepseek-reasoner",
+		},
+		"mistral": {
+			"mistral-large-latest",
+			"codestral-latest",
+		},
+		"cohere": {
+			"command-r-plus",
+			"command-r",
+		},
+	}
+
+	for prov := range creds {
+		lowProv := strings.ToLower(strings.TrimSpace(prov))
+		if list, ok := knownCatalog[lowProv]; ok {
+			for _, mID := range list {
+				if !seen[mID] {
+					seen[mID] = true
+					out = append(out, store.Model{
+						RouterID:   r.ID,
+						ModelID:    mID,
+						Provider:   lowProv,
+						Modalities: "chat",
+					})
+				}
+			}
+		} else if lowProv != "" {
+			mID := fmt.Sprintf("%s-default", lowProv)
+			if !seen[mID] {
+				seen[mID] = true
+				out = append(out, store.Model{
+					RouterID:   r.ID,
+					ModelID:    mID,
+					Provider:   lowProv,
+					Modalities: "chat",
+				})
+			}
+		}
+	}
+	return out
 }

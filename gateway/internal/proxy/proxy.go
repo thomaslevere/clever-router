@@ -458,8 +458,18 @@ func (p *Proxy) transformHTML(raw []byte, prefix, slug string) []byte {
 	htmlStr = strings.ReplaceAll(htmlStr, `src="/assets/`, fmt.Sprintf(`src="%s/assets/`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `href="/assets/`, fmt.Sprintf(`href="%s/assets/`, prefix))
 
+	// Rewrite ALL Next.js App Router RSC chunk references and JS string literals (both unescaped and escaped JSON)
+	// Next.js 14 App Router embeds 100+ client component chunk paths in self.__next_f payloads as \"/_next/...\"
+	htmlStr = strings.ReplaceAll(htmlStr, `\"/_next/`, fmt.Sprintf(`\"%s/_next/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"/_next/`, fmt.Sprintf(`"%s/_next/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `'/_next/`, fmt.Sprintf(`'%s/_next/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"/static/`, fmt.Sprintf(`\"%s/static/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"/static/`, fmt.Sprintf(`"%s/static/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `'/_static/`, fmt.Sprintf(`'%s/static/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `\"/assets/`, fmt.Sprintf(`\"%s/assets/`, prefix))
+	htmlStr = strings.ReplaceAll(htmlStr, `"/assets/`, fmt.Sprintf(`"%s/assets/`, prefix))
+
 	// Rewrite common root-relative PWA/meta resources (manifest, icons, favicons, etc.)
-	// HTML attribute format: href="/manifest.webmanifest"
 	htmlStr = strings.ReplaceAll(htmlStr, `href="/manifest.webmanifest"`, fmt.Sprintf(`href="%s/manifest.webmanifest"`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `href="/manifest.json"`, fmt.Sprintf(`href="%s/manifest.json"`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `href="/favicon.ico"`, fmt.Sprintf(`href="%s/favicon.ico"`, prefix))
@@ -469,11 +479,7 @@ func (p *Proxy) transformHTML(raw []byte, prefix, slug string) []byte {
 	htmlStr = strings.ReplaceAll(htmlStr, `src="/favicon`, fmt.Sprintf(`src="%s/favicon`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `src="/icon-`, fmt.Sprintf(`src="%s/icon-`, prefix))
 
-	// RSC (React Server Components) JSON payload format.
-	// Next.js 14+ embeds metadata as nested JSON strings where quotes appear as \" (escaped).
-	// The actual bytes in the HTML are: \"href\":\"\/manifest.webmanifest\"
-	// We need to match both the unescaped and escaped variants.
-	// Unescaped JSON format: "href":"/manifest.webmanifest"
+	// RSC (React Server Components) JSON payload format (both unescaped and escaped JSON)
 	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/manifest.webmanifest"`, fmt.Sprintf(`"href":"%s/manifest.webmanifest"`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/manifest.json"`, fmt.Sprintf(`"href":"%s/manifest.json"`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/favicon.ico"`, fmt.Sprintf(`"href":"%s/favicon.ico"`, prefix))
@@ -482,7 +488,6 @@ func (p *Proxy) transformHTML(raw []byte, prefix, slug string) []byte {
 	htmlStr = strings.ReplaceAll(htmlStr, `"href":"/apple-touch-icon`, fmt.Sprintf(`"href":"%s/apple-touch-icon`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `"src":"/favicon`, fmt.Sprintf(`"src":"%s/favicon`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `"src":"/icon-`, fmt.Sprintf(`"src":"%s/icon-`, prefix))
-	// Escaped JSON format (nested inside another JSON string): \"href\":\"/manifest.webmanifest\"
 	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/manifest.webmanifest\"`, fmt.Sprintf(`\"href\":\"%s/manifest.webmanifest\"`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/manifest.json\"`, fmt.Sprintf(`\"href\":\"%s/manifest.json\"`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `\"href\":\"/favicon.ico\"`, fmt.Sprintf(`\"href\":\"%s/favicon.ico\"`, prefix))
@@ -492,8 +497,8 @@ func (p *Proxy) transformHTML(raw []byte, prefix, slug string) []byte {
 	htmlStr = strings.ReplaceAll(htmlStr, `\"src\":\"/favicon`, fmt.Sprintf(`\"src\":\"%s/favicon`, prefix))
 	htmlStr = strings.ReplaceAll(htmlStr, `\"src\":\"/icon-`, fmt.Sprintf(`\"src\":\"%s/icon-`, prefix))
 
-	// 3. Inject <base> tag and client-side history guard into <head>
-	clientGuardScript := fmt.Sprintf(`<base href="%s/" /><script>
+	// 3. Inject client-side routing & fetch guard into <head>
+	clientGuardScript := fmt.Sprintf(`<script>
 window.__BASE_PATH__ = "%s";
 window.__ROUTER_SLUG__ = "%s";
 (function(){
@@ -523,19 +528,23 @@ window.__ROUTER_SLUG__ = "%s";
   if (typeof window.fetch !== "undefined") {
     var origFetch = window.fetch;
     window.fetch = function(input, init) {
-      if (typeof input === "string" && input.startsWith("/") && !input.startsWith(p + "/") && !input.startsWith("/admin")) {
-        input = p + input;
-      } else if (input instanceof Request) {
-        var u = new URL(input.url);
-        if (u.pathname.startsWith("/") && !u.pathname.startsWith(p + "/") && !u.pathname.startsWith("/admin")) {
-          input = new Request(p + u.pathname + u.search + u.hash, input);
+      if (typeof input === "string") {
+        if (input.startsWith("/") && !input.startsWith(p + "/") && !input.startsWith("/admin")) {
+          input = p + input;
         }
+      } else if (input instanceof Request) {
+        try {
+          var u = new URL(input.url);
+          if (u.origin === window.location.origin && u.pathname.startsWith("/") && !u.pathname.startsWith(p + "/") && !u.pathname.startsWith("/admin")) {
+            input = new Request(p + u.pathname + u.search + u.hash, input);
+          }
+        } catch(e){}
       }
       return origFetch.apply(this, [input, init]);
     };
   }
 })();
-</script>`, prefix, prefix, slug, prefix, prefix, prefix)
+</script>`, prefix, slug, prefix, prefix, prefix)
 
 	// Inject into <head>
 	lowerHTML := strings.ToLower(htmlStr)

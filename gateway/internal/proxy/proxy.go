@@ -146,16 +146,21 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 		return
 	}
 
-	// Automatic redirect from /dashboard to / only for FreeLLMAPI (which has its SPA at root and no /dashboard page)
-	if isRootProxy && c.Request.Method == "GET" && (c.Request.URL.Path == "/dashboard" || c.Request.URL.Path == "/dashboard/") {
+	if isRootProxy && c.Request.Method == "GET" && !strings.HasPrefix(c.Request.URL.Path, "/v1") && !strings.HasPrefix(c.Request.URL.Path, "/api") {
 		low := strings.ToLower(targetSlug)
-		if strings.Contains(low, "freellm") {
-			dest := "/"
-			if c.Request.URL.RawQuery != "" {
-				dest += "?" + c.Request.URL.RawQuery
-			}
-			c.Redirect(http.StatusFound, dest)
+		if strings.Contains(low, "portkey") {
+			p.servePortkeyDashboard(c, targetSlug, target)
 			return
+		}
+		if c.Request.URL.Path == "/dashboard" || c.Request.URL.Path == "/dashboard/" {
+			if strings.Contains(low, "freellm") {
+				dest := "/"
+				if c.Request.URL.RawQuery != "" {
+					dest += "?" + c.Request.URL.RawQuery
+				}
+				c.Redirect(http.StatusFound, dest)
+				return
+			}
 		}
 	}
 

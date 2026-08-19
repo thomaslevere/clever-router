@@ -123,7 +123,7 @@ export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: strin
 
   let targetPath = `/${slug}/open`;
   if (router.adapter_type === "portkey" || slug.toLowerCase().includes("portkey")) {
-    targetPath = `/${slug}/ui`;
+    targetPath = `/${slug}/open`;
   } else if (router.adapter_type === "litellm" || slug.toLowerCase().includes("litellm")) {
     targetPath = `/${slug}/ui/`;
   } else if (router.native_panel_url && router.native_panel_url.trim() !== "" && router.native_panel_url !== "/dashboard") {

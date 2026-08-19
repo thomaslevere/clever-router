@@ -226,7 +226,7 @@ export default function AddRouterModal({
                 <span>CoAI / Chat Nio Gateway</span>
               </div>
               <p className="text-[11px] text-slate-600 dark:text-slate-300">
-                Enterprise AI gateway with multi-channel load balancing and model caching. Requires a MySQL database (<code className="font-mono text-sky-600 dark:text-sky-400">MYSQL_HOST</code>, <code className="font-mono text-sky-600 dark:text-sky-400">MYSQL_USER</code>, <code className="font-mono text-sky-600 dark:text-sky-400">MYSQL_PASSWORD</code>, <code className="font-mono text-sky-600 dark:text-sky-400">MYSQL_DB</code>) configured in the router's Environment Variables.
+                Enterprise AI gateway with multi-channel load balancing and model caching. Requires a MySQL database (<code className="font-mono text-sky-600 dark:text-sky-400">MYSQL_HOST</code>, <code className="font-mono text-sky-600 dark:text-sky-400">MYSQL_USER</code>, <code className="font-mono text-sky-600 dark:text-sky-400">MYSQL_PASSWORD</code>, <code className="font-mono text-sky-600 dark:text-sky-400">MYSQL_DB</code>) configured in the router&apos;s Environment Variables.
               </p>
               <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
                 <span>Multi-core acceleration:</span>

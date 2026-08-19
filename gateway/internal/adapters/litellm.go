@@ -138,8 +138,6 @@ func (LiteLLMAdapter) Env(r *store.Router, decrypted map[string]string) []string
 	envMap["PORT"] = port
 	envMap["LITELLM_PORT"] = port
 	envMap["DATA_DIR"] = dataPath
-	envMap["DATABASE_URL"] = "sqlite:////" + strings.TrimRight(dataPath, "/") + "/litellm.db"
-	envMap["STORE_MODEL_IN_DB"] = "False"
 	// Default to 4 multi-process workers for optimal 12-core CPU scaling
 	envMap["NUM_WORKERS"] = "4"
 	envMap["LITELLM_WORKER_COUNT"] = "4"

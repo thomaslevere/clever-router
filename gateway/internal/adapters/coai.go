@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 
@@ -77,11 +79,11 @@ func (CoAIAdapter) Mounts(r *store.Router) []string {
 	}
 }
 
-// EnsurePermanentSecrets verifies that a stable secret exists for CoAI.
+// EnsurePermanentSecrets verifies that a stable secret exists for CoAI (min 32 bytes).
 func (CoAIAdapter) EnsurePermanentSecrets(ctx context.Context, r *store.Router, box *secrets.Box) ([]store.EnvVariable, bool) {
 	hasSecret := false
 	for _, ev := range r.EnvVars {
-		if (ev.Key == "COAI_ADMIN_KEY" || ev.Key == "JWT_SECRET" || ev.Key == "SECRET_KEY") && strings.TrimSpace(ev.Value) != "" {
+		if (ev.Key == "SECRET" || ev.Key == "COAI_ADMIN_KEY" || ev.Key == "JWT_SECRET" || ev.Key == "SECRET_KEY") && len(strings.TrimSpace(ev.Value)) >= 32 {
 			hasSecret = true
 			break
 		}
@@ -95,15 +97,20 @@ func (CoAIAdapter) EnsurePermanentSecrets(ctx context.Context, r *store.Router, 
 	if _, err := rand.Read(bytes); err != nil {
 		log.Printf("[coai] warning: crypto/rand error: %v", err)
 	}
-	secretHex := "coai-" + hex.EncodeToString(bytes)
+	secretHex := hex.EncodeToString(bytes)
 
 	cipher, err := secrets.EncryptValue(box, secretHex)
 	if err != nil {
-		log.Printf("[coai] error encrypting COAI_ADMIN_KEY: %v", err)
+		log.Printf("[coai] error encrypting SECRET: %v", err)
 		return r.EnvVars, false
 	}
 
 	newEnv := append(r.EnvVars,
+		store.EnvVariable{
+			Key:      "SECRET",
+			Value:    cipher,
+			IsSecret: true,
+		},
 		store.EnvVariable{
 			Key:      "COAI_ADMIN_KEY",
 			Value:    cipher,
@@ -141,6 +148,41 @@ func (CoAIAdapter) Env(r *store.Router, decrypted map[string]string) []string {
 	envMap["SERVE_STATIC"] = "true"
 	envMap["CACHE_ENABLED"] = "true"
 	envMap["LOG_LEVEL"] = "info"
+
+	// Ensure strong 64-char SECRET default (Chat Nio panics/warns on < 32 bytes)
+	bytes := make([]byte, 32)
+	_, _ = rand.Read(bytes)
+	defaultSecret := hex.EncodeToString(bytes)
+	envMap["SECRET"] = defaultSecret
+	envMap["JWT_SECRET"] = defaultSecret
+	envMap["COAI_ADMIN_KEY"] = defaultSecret
+
+	// Auto-inject Redis connection from orchestrator environment if not overridden
+	if rURL := os.Getenv("REDIS_URL"); rURL != "" {
+		if u, err := url.Parse(rURL); err == nil {
+			if h := u.Hostname(); h != "" {
+				envMap["REDIS_HOST"] = h
+			}
+			if p := u.Port(); p != "" {
+				envMap["REDIS_PORT"] = p
+			}
+			if pass, ok := u.User.Password(); ok && pass != "" {
+				envMap["REDIS_PASSWORD"] = pass
+			}
+		}
+	}
+	if _, ok := envMap["REDIS_HOST"]; !ok {
+		if addr := os.Getenv("REDIS_ADDR"); addr != "" {
+			parts := strings.Split(addr, ":")
+			envMap["REDIS_HOST"] = parts[0]
+			if len(parts) > 1 {
+				envMap["REDIS_PORT"] = parts[1]
+			}
+			if pass := os.Getenv("REDIS_PASSWORD"); pass != "" {
+				envMap["REDIS_PASSWORD"] = pass
+			}
+		}
+	}
 
 	// 2. Legacy router config["env"] (map) if present
 	if cfgEnv, ok := r.Config["env"].(map[string]any); ok {

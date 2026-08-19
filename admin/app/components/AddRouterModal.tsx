@@ -219,6 +219,22 @@ export default function AddRouterModal({
             </div>
           )}
 
+          {form.adapter_type === "coai" && (
+            <div className="space-y-2 rounded-lg bg-sky-500/5 dark:bg-sky-500/10 p-3.5 border border-sky-500/20">
+              <div className="flex items-center gap-2 font-semibold text-sky-600 dark:text-sky-400 text-xs">
+                <span>⚡</span>
+                <span>CoAI / Chat Nio Gateway</span>
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                Enterprise AI gateway with multi-channel load balancing and model caching. Requires a MySQL database (<code className="font-mono text-sky-600 dark:text-sky-400">MYSQL_HOST</code>, <code className="font-mono text-sky-600 dark:text-sky-400">MYSQL_USER</code>, <code className="font-mono text-sky-600 dark:text-sky-400">MYSQL_PASSWORD</code>, <code className="font-mono text-sky-600 dark:text-sky-400">MYSQL_DB</code>) configured in the router's Environment Variables.
+              </p>
+              <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-2">
+                <span>Multi-core acceleration:</span>
+                <span className="font-mono text-sky-600 dark:text-sky-400 font-bold">12 vCPUs / 6 GB</span>
+              </div>
+            </div>
+          )}
+
           {form.adapter_type === "freellmapi" && (
             <div className="space-y-2 rounded-lg bg-emerald-500/5 dark:bg-emerald-500/10 p-3.5 border border-emerald-500/20">
               <div className="flex items-center gap-2 font-semibold text-emerald-600 dark:text-emerald-400 text-xs">

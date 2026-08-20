@@ -188,6 +188,15 @@ func (a *API) Register(r *gin.Engine) {
 	// Example: /omnirouter/v1/chat/completions (API)
 	// Example: /omnirouter/dashboard           (native UI)
 	p := proxy.New(a.table, keys.NewAuth(a.store, a.cache), a.store, a.cache, a.cfg)
+	r.GET("/", func(c *gin.Context) {
+		c.JSON(200, gin.H{
+			"service": "CleverRoute",
+			"status":  "ok",
+			"admin":   "/admin",
+			"docs":    "Use /:slug/v1/* to access router APIs",
+		})
+	})
+	r.NoRoute(p.Handle)
 	r.Any("/:slug", p.Handle)
 	r.Any("/:slug/*path", p.Handle)
 }
@@ -481,6 +490,20 @@ func (a *API) createRouter(c *gin.Context) {
 			imageRef = "decolua/9router:latest"
 		case "freellmapi":
 			imageRef = "ghcr.io/tashfeenahmed/freellmapi:latest"
+		case "litellm":
+			imageRef = "ghcr.io/berriai/litellm:main-stable"
+		case "new-api", "newapi":
+			imageRef = "calciumion/new-api:latest"
+		case "portkey":
+			imageRef = "portkeyai/gateway:latest"
+		case "bifrost":
+			imageRef = "maximhq/bifrost:latest"
+		case "coai":
+			imageRef = "coaidev/coai:latest"
+		case "llmgateway":
+			imageRef = "ghcr.io/theopenco/llmgateway-unified:latest"
+		case "openconnector":
+			imageRef = "ghcr.io/oomol-lab/open-connector:latest"
 		default:
 			imageRef = "diegosouzapw/omniroute:latest"
 		}
@@ -834,12 +857,18 @@ func (a *API) discoverRouter(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
 	}
-	go func() {
-		if err := a.manager.DiscoverModels(context.Background(), r, nil, ""); err != nil {
-			log.Printf("[api] discover %s: %v", r.Slug, err)
-		}
-	}()
-	c.JSON(202, gin.H{"ok": true})
+	if err := a.manager.DiscoverModels(c.Request.Context(), r, nil, ""); err != nil {
+		log.Printf("[api] discover %s: %v", r.Slug, err)
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	models, _ := a.store.ListModels(c.Request.Context(), r.ID)
+	c.JSON(200, gin.H{
+		"ok":              true,
+		"models_count":    len(models),
+		"providers_count": r.ProvidersCount,
+		"models":          models,
+	})
 }
 
 func (a *API) getInitialPassword(c *gin.Context) {

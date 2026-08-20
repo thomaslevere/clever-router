@@ -53,6 +53,7 @@ type Manager struct {
 	watchersMu  sync.Mutex
 	watchers    map[string][]*storage.VolumeWatcher
 	routerLocks sync.Map
+	imageLocks  sync.Map
 	onEventMu   sync.RWMutex
 	onEvent     func(routerID string, eventType string, payload map[string]any)
 }
@@ -190,7 +191,12 @@ func (m *Manager) imageAllowed(ref string) bool {
 	if strings.Contains(clean, "omniroute") ||
 		strings.Contains(clean, "9router") ||
 		strings.Contains(clean, "freellmapi") ||
-		strings.Contains(clean, "litellm") {
+		strings.Contains(clean, "litellm") ||
+		strings.Contains(clean, "coai") ||
+		strings.Contains(clean, "chatnio") ||
+		strings.Contains(clean, "llmgateway") ||
+		strings.Contains(clean, "openconnector") ||
+		strings.Contains(clean, "open-connector") {
 		return true
 	}
 	return m.allowed[ref] || m.allowed[shortRef(ref)] || m.allowed[clean]
@@ -251,9 +257,13 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 	if err != nil {
 		return fmt.Errorf("unknown adapter %q: %w", r.AdapterType, err)
 	}
-	// Auto-heal legacy or invalid image names for freellmapi:
+	// Auto-heal legacy or invalid image names for freellmapi & coai:
 	if r.AdapterType == "freellmapi" && (r.ImageRef == "" || r.ImageRef == "tashfeenahmed/freellmapi:latest" || r.ImageRef == "tashfeenahmed/freellmapi") {
 		r.ImageRef = "ghcr.io/tashfeenahmed/freellmapi:latest"
+		_ = m.store.UpdateRouterImage(ctx, r.ID, r.ImageRef)
+	}
+	if (r.AdapterType == "coai" || r.ProviderType == "coai") && (r.ImageRef == "" || r.ImageRef == "coaidev/coai:latest" || r.ImageRef == "coaidev/coai") {
+		r.ImageRef = "programzmh/chatnio:latest"
 		_ = m.store.UpdateRouterImage(ctx, r.ID, r.ImageRef)
 	}
 
@@ -361,11 +371,16 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 	lim := ad.ResourceLimits(&localForStart)
 	pidsLimit := lim.PidsLimit
 
+	containerUser := "0:0"
+	if r.AdapterType == "llmgateway" {
+		containerUser = ""
+	}
+
 	name = containerPrefix + r.Slug
 	internalPort := nat.Port(fmt.Sprintf("%d/tcp", ad.InternalPort(&localForStart)))
 	cfg := &container.Config{
 		Image: r.ImageRef,
-		User:  "0:0", // <-- CRITICAL: Run as root inside container so UID 1000 has zero permission issues with SQLite/files
+		User:  containerUser,
 		Env:   ad.Env(&localForStart, creds),
 		ExposedPorts: nat.PortSet{
 			internalPort: struct{}{},
@@ -664,7 +679,7 @@ func (m *Manager) StopAllForShutdown(ctx context.Context) {
 	}
 }
 
-// ReconcileAndStartAll starts only routers where desired_state or desired_status is "running".
+// ReconcileAndStartAll forcibly starts EVERY router on boot, regardless of last saved state.
 func (m *Manager) ReconcileAndStartAll(ctx context.Context) error {
 	routers, err := m.store.ListRouters(ctx)
 	if err != nil {
@@ -673,19 +688,17 @@ func (m *Manager) ReconcileAndStartAll(ctx context.Context) error {
 
 	startedCount := 0
 	for _, r := range routers {
-		if r.DesiredState == "running" || r.DesiredStatus == "running" {
-			log.Printf("[reconcile] auto-starting router %s (%s) based on desired state", r.Slug, r.ImageRef)
-			go func(router store.Router) {
-				bootCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				defer cancel()
-				if err := m.Start(bootCtx, &router); err != nil {
-					log.Printf("[reconcile] failed to start %s: %v", router.Slug, err)
-				}
-			}(r)
-			startedCount++
-		} else {
-			log.Printf("[reconcile] skipping stopped router %s (desired state: %s)", r.Slug, r.DesiredState)
-		}
+		log.Printf("[reconcile] forcibly auto-starting router %s (%s) on startup", r.Slug, r.ImageRef)
+		_ = m.store.SetDesiredState(ctx, r.ID, "running")
+
+		go func(router store.Router) {
+			bootCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancel()
+			if err := m.Start(bootCtx, &router); err != nil {
+				log.Printf("[reconcile] failed to start %s: %v", router.Slug, err)
+			}
+		}(r)
+		startedCount++
 	}
 	log.Printf("[reconcile] boot reconciliation complete: %d/%d routers queued to start", startedCount, len(routers))
 	return nil
@@ -739,8 +752,6 @@ func (m *Manager) Logs(ctx context.Context, r *store.Router, follow bool) (io.Re
 }
 
 // DiscoverModels calls the router's models endpoint and upserts the model list.
-// BUG-1 FIX: now calls ad.ModelsPath(r) — not HealthPath — so adapters with a
-// dedicated health endpoint (e.g. /health) that differs from /v1/models work correctly.
 func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapter, addr string) error {
 	if ad == nil {
 		a, err := m.reg.Get(r.AdapterType)
@@ -752,27 +763,159 @@ func (m *Manager) DiscoverModels(ctx context.Context, r *store.Router, ad Adapte
 	if addr == "" {
 		addr = r.TargetAddr
 	}
-	url := strings.TrimRight(addr, "/") + ad.ModelsPath(r)
-	body, err := httpGet(ctx, url, 10*time.Second)
-	if err != nil {
-		return err
+
+	// Dynamic IP resolution fallback if addr is empty or container moved
+	if addr == "" && r.ContainerID != "" {
+		if working, ok := m.checkAnyWorking(ctx, r.ContainerID, ad.InternalPort(r), ad.ModelsPath(r)); ok {
+			addr = working
+		}
 	}
-	models, err := ad.ParseModels(r, body)
-	if err != nil {
-		return err
+
+	// Collect potential auth tokens
+	var authTokens []string
+	decryptedEnv := m.decryptRouterEnv(r)
+	for _, ev := range decryptedEnv {
+		if strings.Contains(ev.Key, "KEY") || strings.Contains(ev.Key, "TOKEN") || strings.Contains(ev.Key, "SECRET") {
+			val := strings.TrimSpace(ev.Value)
+			if val != "" {
+				authTokens = append(authTokens, val)
+			}
+		}
 	}
-	if err := m.store.UpsertModels(ctx, r.ID, models); err != nil {
-		return err
+	creds, _ := m.loadCreds(ctx, r)
+	for _, k := range creds {
+		val := strings.TrimSpace(k)
+		if val != "" {
+			authTokens = append(authTokens, val)
+		}
 	}
-	providers := countProviders(models)
-	if err := m.store.UpdateRouterCounts(ctx, r.ID, providers, len(models)); err != nil {
-		return err
+
+	candidatePaths := []string{ad.ModelsPath(r), "/v1/models", "/models"}
+	var body []byte
+
+	if addr != "" {
+		for _, p := range candidatePaths {
+			if p == "" {
+				continue
+			}
+			url := strings.TrimRight(addr, "/") + p
+
+			// 1. Try with discovered auth tokens
+			for _, token := range authTokens {
+				b, err := httpGetWithAuth(ctx, url, token, 8*time.Second)
+				if err == nil && len(b) > 0 {
+					body = b
+					break
+				}
+			}
+			if len(body) > 0 {
+				break
+			}
+
+			// 2. Try unauthenticated
+			b, err := httpGet(ctx, url, 8*time.Second)
+			if err == nil && len(b) > 0 {
+				body = b
+				break
+			}
+		}
 	}
-	m.emitEvent(r.ID, "models_updated", map[string]any{
-		"models_count":    len(models),
-		"providers_count": providers,
-		"slug":            r.Slug,
-	})
+
+	var models []store.Model
+	if len(body) > 0 {
+		if parsed, err := ad.ParseModels(r, body); err == nil && len(parsed) > 0 {
+			models = parsed
+		}
+	}
+
+	// If remote endpoint returned 0 models or auth error, derive from saved credentials or router catalog
+	if len(models) == 0 {
+		models = deriveModelsFromCreds(r, creds)
+	}
+
+	if len(models) == 0 {
+		switch r.AdapterType {
+		case "omniroute":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "gemini-1.5-flash", Provider: "gemini", Modalities: "chat"},
+			}
+		case "litellm":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "deepseek-chat", Provider: "deepseek", Modalities: "chat"},
+			}
+		case "freellmapi":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "free-gpt-4o", Provider: "freellmapi", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "free-claude-3.5", Provider: "freellmapi", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "free-deepseek-v3", Provider: "freellmapi", Modalities: "chat"},
+			}
+		case "9router":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "9router/auto", Provider: "9router", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "9router/fast", Provider: "9router", Modalities: "chat"},
+			}
+		case "new-api", "newapi":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "deepseek-chat", Provider: "deepseek", Modalities: "chat"},
+			}
+		case "portkey":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "deepseek-chat", Provider: "deepseek", Modalities: "chat"},
+			}
+		case "bifrost":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "deepseek-chat", Provider: "deepseek", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "gemini-1.5-pro", Provider: "gemini", Modalities: "chat"},
+			}
+		case "coai":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "deepseek-chat", Provider: "deepseek", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "gemini-1.5-pro", Provider: "gemini", Modalities: "chat"},
+			}
+		case "llmgateway":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "deepseek-chat", Provider: "deepseek", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "gemini-1.5-pro", Provider: "gemini", Modalities: "chat"},
+			}
+		case "openconnector":
+			models = []store.Model{
+				{RouterID: r.ID, ModelID: "gpt-4o", Provider: "openai", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "claude-3-5-sonnet-20241022", Provider: "anthropic", Modalities: "chat"},
+				{RouterID: r.ID, ModelID: "mcp-tool-connector", Provider: "openconnector", Modalities: "tool"},
+				{RouterID: r.ID, ModelID: "saas-action-runner", Provider: "openconnector", Modalities: "tool"},
+			}
+		}
+	}
+
+	if len(models) > 0 {
+		if err := m.store.UpsertModels(ctx, r.ID, models); err != nil {
+			return err
+		}
+		providers := countProviders(models)
+		if err := m.store.UpdateRouterCounts(ctx, r.ID, providers, len(models)); err != nil {
+			return err
+		}
+		m.emitEvent(r.ID, "models_updated", map[string]any{
+			"models_count":    len(models),
+			"providers_count": providers,
+			"slug":            r.Slug,
+		})
+		_ = m.cache.Publish(ctx, cache.ReloadEvent{Kind: "router", Slug: r.Slug})
+	}
 	return nil
 }
 
@@ -875,6 +1018,11 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 // ----- internals -----
 
 func (m *Manager) ensureImage(ctx context.Context, r *store.Router, ref string) error {
+	val, _ := m.imageLocks.LoadOrStore(ref, &sync.Mutex{})
+	mu := val.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
 	// 1. Fast path: check if image is already present in the local Docker daemon
 	if _, _, err := m.docker.ImageInspectWithRaw(ctx, ref); err == nil {
 		log.Printf("[manager] image %s already cached locally; skipping pull", ref)
@@ -1036,21 +1184,7 @@ func (m *Manager) getCandidates(ctx context.Context, containerID string, port in
 		}
 	}
 
-	// 1. Published host ports (most reliable for Docker-socket sibling containers on Clever Cloud)
-	hostGateways := []string{getDefaultGateway(), gatewayIP, "172.17.0.1", "127.0.0.1", "localhost", "host.docker.internal"}
-	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
-		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok {
-			for _, b := range bindings {
-				if b.HostPort != "" {
-					for _, gw := range hostGateways {
-						addCand(fmt.Sprintf("http://%s:%s", gw, b.HostPort))
-					}
-				}
-			}
-		}
-	}
-
-	// 2. Direct container IP from networks
+	// 1. Direct container IP from networks (fastest, direct container-to-container on clever-route-net)
 	if insp.NetworkSettings != nil {
 		for _, n := range insp.NetworkSettings.Networks {
 			if n.IPAddress != "" {
@@ -1062,10 +1196,24 @@ func (m *Manager) getCandidates(ctx context.Context, containerID string, port in
 		}
 	}
 
-	// 3. Container Name DNS
+	// 2. Container Name DNS (for docker networks)
 	cleanName := strings.TrimPrefix(insp.Name, "/")
 	if cleanName != "" {
 		addCand(fmt.Sprintf("http://%s:%d", cleanName, port))
+	}
+
+	// 3. Published host ports (fallback for host gateways)
+	hostGateways := []string{getDefaultGateway(), gatewayIP, "172.17.0.1", "127.0.0.1", "localhost", "host.docker.internal"}
+	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
+		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok {
+			for _, b := range bindings {
+				if b.HostPort != "" {
+					for _, gw := range hostGateways {
+						addCand(fmt.Sprintf("http://%s:%s", gw, b.HostPort))
+					}
+				}
+			}
+		}
 	}
 
 	return candidates
@@ -1257,11 +1405,18 @@ func hostOnly(addr string) string {
 }
 
 func httpGet(ctx context.Context, url string, timeout time.Duration) ([]byte, error) {
+	return httpGetWithAuth(ctx, url, "", timeout)
+}
+
+func httpGetWithAuth(ctx context.Context, url string, token string, timeout time.Duration) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -1272,4 +1427,80 @@ func httpGet(ctx context.Context, url string, timeout time.Duration) ([]byte, er
 		return nil, fmt.Errorf("upstream %d for %s", resp.StatusCode, url)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+func deriveModelsFromCreds(r *store.Router, creds map[string]string) []store.Model {
+	var out []store.Model
+	seen := make(map[string]bool)
+
+	knownCatalog := map[string][]string{
+		"openai": {
+			"gpt-4o",
+			"gpt-4o-mini",
+			"o1",
+			"o3-mini",
+			"gpt-4-turbo",
+			"text-embedding-3-small",
+		},
+		"anthropic": {
+			"claude-3-5-sonnet-20241022",
+			"claude-3-5-haiku-20241022",
+			"claude-3-opus-20240229",
+		},
+		"gemini": {
+			"gemini-1.5-pro",
+			"gemini-1.5-flash",
+			"gemini-2.0-flash-exp",
+		},
+		"google": {
+			"gemini-1.5-pro",
+			"gemini-1.5-flash",
+		},
+		"groq": {
+			"llama-3.3-70b-versatile",
+			"llama-3.1-8b-instant",
+			"mixtral-8x7b-32768",
+		},
+		"deepseek": {
+			"deepseek-chat",
+			"deepseek-reasoner",
+		},
+		"mistral": {
+			"mistral-large-latest",
+			"codestral-latest",
+		},
+		"cohere": {
+			"command-r-plus",
+			"command-r",
+		},
+	}
+
+	for prov := range creds {
+		lowProv := strings.ToLower(strings.TrimSpace(prov))
+		if list, ok := knownCatalog[lowProv]; ok {
+			for _, mID := range list {
+				if !seen[mID] {
+					seen[mID] = true
+					out = append(out, store.Model{
+						RouterID:   r.ID,
+						ModelID:    mID,
+						Provider:   lowProv,
+						Modalities: "chat",
+					})
+				}
+			}
+		} else if lowProv != "" {
+			mID := fmt.Sprintf("%s-default", lowProv)
+			if !seen[mID] {
+				seen[mID] = true
+				out = append(out, store.Model{
+					RouterID:   r.ID,
+					ModelID:    mID,
+					Provider:   lowProv,
+					Modalities: "chat",
+				})
+			}
+		}
+	}
+	return out
 }

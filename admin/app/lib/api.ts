@@ -115,14 +115,35 @@ export const api = {
   },
 };
 
-export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: string; native_panel_url?: string }): string {
+export function getRouterPanelUrl(router: { endpoint_path?: string; slug?: string; native_panel_url?: string; adapter_type?: string }): string {
   if (typeof window === "undefined") return "";
   const token = getToken();
   const slug = router.slug || (router.endpoint_path ? router.endpoint_path.replace(/^\//, "") : "");
-
   const base = window.location.origin;
-  const url = new URL(`/${slug}/open`, base);
-  if (token) {
+
+  let targetPath = `/${slug}/open`;
+  if (router.adapter_type === "openconnector" || slug.toLowerCase().includes("openconnector")) {
+    targetPath = `/${slug}/open`;
+  } else if (router.adapter_type === "llmgateway" || slug.toLowerCase().includes("llmgateway")) {
+    targetPath = `/${slug}/open`;
+  } else if (router.adapter_type === "coai" || slug.toLowerCase().includes("coai")) {
+    targetPath = `/${slug}/open`;
+  } else if (router.adapter_type === "bifrost" || slug.toLowerCase().includes("bifrost")) {
+    targetPath = `/${slug}/open`;
+  } else if (router.adapter_type === "portkey" || slug.toLowerCase().includes("portkey")) {
+    targetPath = `/${slug}/open`;
+  } else if (router.adapter_type === "litellm" || slug.toLowerCase().includes("litellm")) {
+    targetPath = `/${slug}/ui/`;
+  } else if (router.native_panel_url && router.native_panel_url.trim() !== "" && router.native_panel_url !== "/dashboard") {
+    targetPath = router.native_panel_url.startsWith("http")
+      ? router.native_panel_url
+      : router.native_panel_url.startsWith("/")
+      ? router.native_panel_url
+      : `/${router.native_panel_url}`;
+  }
+
+  const url = targetPath.startsWith("http") ? new URL(targetPath) : new URL(targetPath, base);
+  if (token && !url.searchParams.has("token")) {
     url.searchParams.set("token", token);
   }
   return url.toString();

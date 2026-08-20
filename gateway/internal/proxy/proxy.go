@@ -50,6 +50,7 @@ func New(t *router.Table, a *keys.Auth, st *store.Store, c *cache.Cache, cfg *co
 				MaxIdleConnsPerHost: 512,
 				MaxConnsPerHost:     1024,
 				IdleConnTimeout:     90 * time.Second,
+				DisableCompression:  true,
 			},
 		},
 	}
@@ -71,8 +72,8 @@ type proxyError struct {
 func (p *Proxy) Handle(c *gin.Context) {
 	slug := c.Param("slug")
 
-	// Root path or empty slug: return clean service info instead of 502.
-	if slug == "" {
+	// Root path or empty slug: ALWAYS return clean service info and NEVER forward or hijack to any router UI!
+	if slug == "" || c.Request.URL.Path == "/" {
 		c.JSON(200, gin.H{
 			"service": "CleverRoute",
 			"status":  "ok",
@@ -124,28 +125,100 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 		}
 	}
 
+	// 2. Direct PostgreSQL fallback if in-memory table has not synced yet
+	if !ok && slug != "" {
+		if r, err := p.store.GetRouterBySlug(c.Request.Context(), slug); err == nil && r != nil && r.TargetAddr != "" {
+			targetSlug = r.Slug
+			target = r.TargetAddr
+			ok = true
+			p.table.Set(r.Slug, r.TargetAddr)
+		}
+	}
+
 	if !ok {
 		fail(c, http.StatusBadGateway, "router '%s' is not serving", slug)
 		return
 	}
 
-	// 2. Direct Web UI Activation & Redirection (for single-domain mode)
-	// When user visits /:slug/open, /:slug/dashboard, or /:slug/login directly in browser:
-	// Set the active router cookie and redirect to root /dashboard or /login for 100% native Next.js App Router execution.
-	if !isRootProxy && c.Request.Method == "GET" && !strings.HasPrefix(upstreamPath, "/v1") && !strings.HasPrefix(upstreamPath, "/api") {
-		cleanPath := strings.Trim(upstreamPath, "/")
-		if cleanPath == "open" || cleanPath == "dashboard" || cleanPath == "login" || cleanPath == "" {
-			c.SetCookie("cr_active_router", targetSlug, 86400*7, "/", "", false, false)
-			dest := "/dashboard"
-			if cleanPath == "login" {
-				dest = "/login"
+	if isRootProxy && c.Request.Method == "GET" && !strings.HasPrefix(c.Request.URL.Path, "/v1") && !strings.HasPrefix(c.Request.URL.Path, "/api") {
+		low := strings.ToLower(targetSlug)
+		if strings.Contains(low, "portkey") {
+			p.servePortkeyDashboard(c, targetSlug, target)
+			return
+		}
+		if c.Request.URL.Path == "/dashboard" || c.Request.URL.Path == "/dashboard/" {
+			if strings.Contains(low, "freellm") {
+				dest := "/"
+				if c.Request.URL.RawQuery != "" {
+					dest += "?" + c.Request.URL.RawQuery
+				}
+				c.Redirect(http.StatusFound, dest)
+				return
 			}
+		}
+		if c.Request.URL.Path == "/workspace" || c.Request.URL.Path == "/workspace/" {
+			dest := "/workspace/logs"
 			if c.Request.URL.RawQuery != "" {
 				dest += "?" + c.Request.URL.RawQuery
 			}
 			c.Redirect(http.StatusFound, dest)
 			return
 		}
+	}
+
+	// 2. Direct Web UI Activation & Redirection (for single-domain mode)
+	// When user visits /:slug/open, /:slug/dashboard, /:slug/ui, or /:slug/login directly in browser:
+	// Set the active router cookie and redirect to root /dashboard or /login for 100% native Next.js App Router execution.
+	if !isRootProxy && c.Request.Method == "GET" && !strings.HasPrefix(upstreamPath, "/v1") && !strings.HasPrefix(upstreamPath, "/api") {
+		cleanPath := strings.Trim(upstreamPath, "/")
+		low := strings.ToLower(targetSlug)
+
+		// Serve interactive Portkey AI Gateway Web Dashboard if requested directly in browser
+		if strings.Contains(low, "portkey") && (cleanPath == "open" || cleanPath == "ui" || cleanPath == "dashboard" || cleanPath == "" || cleanPath == "healthz") {
+			p.servePortkeyDashboard(c, targetSlug, target)
+			return
+		}
+
+		if cleanPath == "open" || cleanPath == "dashboard" || cleanPath == "login" || cleanPath == "workspace" || cleanPath == "" {
+			c.SetCookie("cr_active_router", targetSlug, 86400*7, "/", "", false, false)
+			dest := "/dashboard"
+			if strings.Contains(low, "bifrost") {
+				dest = "/workspace/logs"
+			} else if strings.Contains(low, "litellm") {
+				dest = fmt.Sprintf("/%s/ui/", targetSlug)
+			} else if strings.Contains(low, "freellm") {
+				if cleanPath == "login" {
+					dest = "/login"
+				} else {
+					dest = "/"
+				}
+			} else if cleanPath == "login" {
+				dest = "/login"
+			}
+			if c.Request.URL.RawQuery != "" {
+				if strings.Contains(dest, "?") {
+					dest += "&" + c.Request.URL.RawQuery
+				} else {
+					dest += "?" + c.Request.URL.RawQuery
+				}
+			}
+			c.Redirect(http.StatusFound, dest)
+			return
+		}
+	}
+
+	// 3. Clean status response for /:slug/v1 root
+	if strings.Trim(upstreamPath, "/") == "v1" && c.Request.Method == "GET" {
+		c.JSON(http.StatusOK, gin.H{
+			"service": "CleverRoute AI Proxy",
+			"router":  targetSlug,
+			"status":  "ready",
+			"endpoints": gin.H{
+				"models":           fmt.Sprintf("/%s/v1/models", targetSlug),
+				"chat_completions": fmt.Sprintf("/%s/v1/chat/completions", targetSlug),
+			},
+		})
+		return
 	}
 
 	token := p.extractToken(c)
@@ -605,7 +678,12 @@ window.__ROUTER_SLUG__ = "%s";
 }
 
 func (p *Proxy) findFallbackRouter(c *gin.Context) (string, string) {
-	// 1. Check cr_active_router cookie
+	// Root URL must never be proxied to a fallback router
+	if c.Request.URL.Path == "/" || c.Request.URL.Path == "" {
+		return "", ""
+	}
+
+	// 1. Check cr_active_router cookie (for static assets /_next/*, /assets/*, /api/*, etc.)
 	if cookie, err := c.Cookie("cr_active_router"); err == nil && cookie != "" {
 		if t, ok := p.table.Lookup(cookie); ok {
 			return cookie, t
@@ -620,14 +698,6 @@ func (p *Proxy) findFallbackRouter(c *gin.Context) (string, string) {
 			if strings.Contains(referer, "/"+s+"/") || strings.Contains(referer, "/"+s+"?") || strings.HasSuffix(referer, "/"+s) {
 				return s, t
 			}
-		}
-	}
-
-	// 3. If exactly 1 router is active in the table, fallback to it
-	snap := p.table.Snapshot()
-	if len(snap) == 1 {
-		for s, t := range snap {
-			return s, t
 		}
 	}
 
@@ -839,3 +909,626 @@ func (s *usageScanner) parse() {
 		return
 	}
 }
+
+func (p *Proxy) servePortkeyDashboard(c *gin.Context, slug, targetAddr string) {
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.String(http.StatusOK, `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Portkey AI Gateway — Interactive Web Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: #111827;
+      --card-border: #1f293d;
+      --accent: #6366f1;
+      --accent-hover: #4f46e5;
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --text-dim: #6b7280;
+      --green: #10b981;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --code-bg: #0b0f19;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      background: rgba(17, 24, 39, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--card-border);
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    .logo-badge {
+      background: linear-gradient(135deg, #6366f1 0%, #a855f7 100%);
+      color: white;
+      font-weight: 800;
+      font-size: 1.1rem;
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35);
+    }
+    .brand-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.25rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: rgba(16, 185, 129, 0.12);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      background: #10b981;
+      border-radius: 50%;
+      box-shadow: 0 0 8px #10b981;
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    .nav-btn {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 500;
+      padding: 0.4rem 0.85rem;
+      border-radius: 6px;
+      transition: all 0.15s;
+    }
+    .nav-btn:hover {
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.05);
+    }
+    .nav-btn.primary {
+      background: var(--accent);
+      color: white;
+    }
+    .nav-btn.primary:hover {
+      background: var(--accent-hover);
+    }
+    main {
+      max-width: 1200px;
+      width: 100%;
+      margin: 2rem auto;
+      padding: 0 1.5rem;
+      flex: 1;
+    }
+    .banner {
+      background: linear-gradient(135deg, rgba(99, 102, 241, 0.1) 0%, rgba(168, 85, 247, 0.05) 100%);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      border-radius: 12px;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 2rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    .banner-info h2 {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+    .banner-info p {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+    .endpoint-box {
+      background: var(--code-bg);
+      border: 1px solid var(--card-border);
+      padding: 0.5rem 0.85rem;
+      border-radius: 8px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      color: #818cf8;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .tabs {
+      display: flex;
+      gap: 0.5rem;
+      border-bottom: 1px solid var(--card-border);
+      margin-bottom: 1.5rem;
+    }
+    .tab-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-family: inherit;
+      font-size: 0.9rem;
+      font-weight: 600;
+      padding: 0.75rem 1.25rem;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+    }
+    .tab-btn:hover {
+      color: var(--text);
+    }
+    .tab-btn.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .tab-content {
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
+    }
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+    }
+    @media (max-width: 850px) {
+      .grid-2 { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 1.5rem;
+    }
+    .card-title {
+      font-size: 1rem;
+      font-weight: 700;
+      margin-bottom: 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .form-group {
+      margin-bottom: 1rem;
+    }
+    label {
+      display: block;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 0.4rem;
+    }
+    input, select, textarea {
+      width: 100%;
+      background: var(--code-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text);
+      font-family: inherit;
+      font-size: 0.85rem;
+      padding: 0.6rem 0.85rem;
+      border-radius: 8px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--accent);
+    }
+    textarea {
+      font-family: 'JetBrains Mono', monospace;
+      min-height: 100px;
+      resize: vertical;
+    }
+    .btn {
+      background: var(--accent);
+      color: white;
+      border: none;
+      font-family: inherit;
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 0.65rem 1.25rem;
+      border-radius: 8px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      transition: background 0.15s;
+      width: 100%;
+      justify-content: center;
+    }
+    .btn:hover {
+      background: var(--accent-hover);
+    }
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .output-area {
+      background: var(--code-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 1rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      color: #d1d5db;
+      min-height: 280px;
+      max-height: 480px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .metric-tag {
+      font-size: 0.75rem;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+    }
+    .metric-success { background: rgba(16, 185, 129, 0.15); color: #34d399; }
+    .metric-error { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+    .code-block {
+      background: var(--code-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 1rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      color: #e2e8f0;
+      position: relative;
+      margin-top: 0.5rem;
+      white-space: pre;
+      overflow-x: auto;
+    }
+    .copy-btn {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: var(--text-muted);
+      font-size: 0.7rem;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .copy-btn:hover { background: rgba(255, 255, 255, 0.2); color: var(--text); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo-badge">PK</div>
+      <div>
+        <div class="brand-title">Portkey AI Gateway</div>
+      </div>
+      <span class="status-pill"><span class="status-dot"></span> Online (Port 8787)</span>
+    </div>
+    <div class="nav-links">
+      <a href="/admin/routers" class="nav-btn">← CleverRoute Admin</a>
+      <a href="https://docs.portkey.ai" target="_blank" rel="noreferrer" class="nav-btn primary">Portkey Docs ↗</a>
+    </div>
+  </header>
+
+  <main>
+    <div class="banner">
+      <div class="banner-info">
+        <h2>Router Instance: ` + slug + `</h2>
+        <p>Ultra-fast multi-provider AI Gateway with fallback routing, load balancing, and prompt management.</p>
+      </div>
+      <div class="endpoint-box">
+        <span>Base URL:</span>
+        <span id="baseUrlDisplay">/` + slug + `/v1</span>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-btn active" onclick="showTab('playground')">⚡ Live API Playground</button>
+      <button class="tab-btn" onclick="showTab('config')">⚙️ Config & Strategy Builder</button>
+      <button class="tab-btn" onclick="showTab('snippets')">💻 Client SDK Snippets</button>
+    </div>
+
+    <!-- TAB 1: PLAYGROUND -->
+    <div id="tab-playground" class="tab-content active">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title"><span>📡 Request Parameters</span></div>
+          <div class="form-group">
+            <label>AI Provider (x-portkey-provider)</label>
+            <select id="reqProvider" onchange="onProviderChange()">
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="groq">Groq</option>
+              <option value="mistral">Mistral AI</option>
+              <option value="cohere">Cohere</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Model ID</label>
+            <input type="text" id="reqModel" value="gpt-4o" placeholder="e.g. gpt-4o">
+          </div>
+          <div class="form-group">
+            <label>Provider API Key (Optional / x-portkey-api-key)</label>
+            <input type="password" id="reqApiKey" placeholder="sk-..." oninput="saveApiKey(this.value)">
+          </div>
+          <div class="form-group">
+            <label>Prompt / Chat Message</label>
+            <textarea id="reqPrompt" rows="3">Explain quantum computing in one short sentence.</textarea>
+          </div>
+          <button class="btn" id="sendBtn" onclick="sendTestRequest()">
+            <span>🚀 Send Request via Portkey</span>
+          </button>
+        </div>
+
+        <div class="card">
+          <div class="card-title" style="justify-content: space-between;">
+            <span>📥 Gateway Response</span>
+            <span id="metricBadge" class="metric-tag" style="display:none;"></span>
+          </div>
+          <div class="output-area" id="outputConsole">Ready. Click "Send Request via Portkey" to execute a live AI completion through this router instance.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: CONFIG BUILDER -->
+    <div id="tab-config" class="tab-content">
+      <div class="card">
+        <div class="card-title"><span>⚙️ Multi-Provider Fallback & Load Balancer Generator</span></div>
+        <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem;">
+          Generate <code>x-portkey-config</code> JSON payloads to enable zero-downtime provider fallbacks and traffic distribution.
+        </p>
+        <div class="grid-2">
+          <div>
+            <div class="form-group">
+              <label>Strategy Mode</label>
+              <select id="configMode" onchange="generateConfig()">
+                <option value="fallback">Fallback (Primary -> Secondary on error)</option>
+                <option value="loadbalance">Load Balance (Distribute across providers)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Primary Provider</label>
+              <select id="primaryProv" onchange="generateConfig()">
+                <option value="openai">OpenAI (gpt-4o)</option>
+                <option value="anthropic">Anthropic (claude-3-5-sonnet)</option>
+                <option value="deepseek">DeepSeek (deepseek-chat)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Fallback Provider</label>
+              <select id="fallbackProv" onchange="generateConfig()">
+                <option value="deepseek">DeepSeek (deepseek-chat)</option>
+                <option value="anthropic">Anthropic (claude-3-5-sonnet)</option>
+                <option value="openai">OpenAI (gpt-4o)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Max Retries</label>
+              <input type="number" id="configRetries" value="3" min="1" max="5" oninput="generateConfig()">
+            </div>
+          </div>
+          <div>
+            <label>Generated x-portkey-config Header JSON</label>
+            <div class="code-block" id="configOutput">
+              <button class="copy-btn" onclick="copyConfig()">Copy</button>
+              <code id="configJsonCode"></code>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 3: CODE SNIPPETS -->
+    <div id="tab-snippets" class="tab-content">
+      <div class="card">
+        <div class="card-title"><span>💻 Client Integration Examples</span></div>
+        <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1.5rem;">
+          Connect your application to this Portkey AI Gateway instance using standard OpenAI client libraries or native cURL requests.
+        </p>
+
+        <label>cURL</label>
+        <div class="code-block">
+          <button class="copy-btn" onclick="copySnippet('curlCode')">Copy</button>
+          <code id="curlCode">curl -X POST https://YOUR_DOMAIN/` + slug + `/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "x-portkey-provider: openai" \
+  -H "Authorization: Bearer YOUR_OPENAI_KEY" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Hello via Portkey!"}]
+  }'</code>
+        </div>
+
+        <label style="margin-top:1.5rem;">Python (OpenAI SDK)</label>
+        <div class="code-block">
+          <button class="copy-btn" onclick="copySnippet('pythonCode')">Copy</button>
+          <code id="pythonCode">from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://YOUR_DOMAIN/` + slug + `/v1",
+    api_key="YOUR_OPENAI_KEY",
+    default_headers={"x-portkey-provider": "openai"}
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Hello via Portkey Gateway!"}]
+)
+print(response.choices[0].message.content)</code>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const slug = "` + slug + `";
+    const origin = window.location.origin;
+    document.getElementById('baseUrlDisplay').innerText = origin + '/' + slug + '/v1';
+
+    // Populate saved API key from localStorage
+    const savedKey = localStorage.getItem('portkey_test_api_key');
+    if (savedKey) {
+      document.getElementById('reqApiKey').value = savedKey;
+    }
+
+    function saveApiKey(val) {
+      localStorage.setItem('portkey_test_api_key', val);
+    }
+
+    function onProviderChange() {
+      const p = document.getElementById('reqProvider').value;
+      const m = document.getElementById('reqModel');
+      if (p === 'openai') m.value = 'gpt-4o';
+      else if (p === 'anthropic') m.value = 'claude-3-5-sonnet-20241022';
+      else if (p === 'gemini') m.value = 'gemini-1.5-flash';
+      else if (p === 'deepseek') m.value = 'deepseek-chat';
+      else if (p === 'groq') m.value = 'llama-3.3-70b-versatile';
+      else if (p === 'mistral') m.value = 'mistral-large-latest';
+      else if (p === 'cohere') m.value = 'command-r-plus';
+    }
+
+    function showTab(tabName) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      event.currentTarget.classList.add('active');
+      document.getElementById('tab-' + tabName).classList.add('active');
+      if (tabName === 'config') generateConfig();
+    }
+
+    async function sendTestRequest() {
+      const provider = document.getElementById('reqProvider').value;
+      const model = document.getElementById('reqModel').value;
+      const apiKey = document.getElementById('reqApiKey').value;
+      const prompt = document.getElementById('reqPrompt').value;
+      const consoleBox = document.getElementById('outputConsole');
+      const metricBadge = document.getElementById('metricBadge');
+      const sendBtn = document.getElementById('sendBtn');
+
+      sendBtn.disabled = true;
+      sendBtn.innerHTML = '<span>⏳ Processing via Portkey Gateway...</span>';
+      consoleBox.innerText = 'Connecting to /' + slug + '/v1/chat/completions...\nProvider: ' + provider + '\nModel: ' + model;
+
+      const headers = {
+        'Content-Type': 'application/json',
+        'x-portkey-provider': provider
+      };
+      if (apiKey) {
+        headers['Authorization'] = 'Bearer ' + apiKey;
+        headers['x-portkey-api-key'] = apiKey;
+      }
+
+      const body = JSON.stringify({
+        model: model,
+        messages: [{ role: 'user', content: prompt }]
+      });
+
+      const startTime = performance.now();
+      try {
+        const resp = await fetch('/' + slug + '/v1/chat/completions', {
+          method: 'POST',
+          headers: headers,
+          body: body
+        });
+        const elapsed = Math.round(performance.now() - startTime);
+        const data = await resp.json();
+
+        metricBadge.style.display = 'inline-block';
+        if (resp.ok) {
+          metricBadge.className = 'metric-tag metric-success';
+          metricBadge.innerText = resp.status + ' OK · ' + elapsed + ' ms';
+        } else {
+          metricBadge.className = 'metric-tag metric-error';
+          metricBadge.innerText = 'HTTP ' + resp.status + ' · ' + elapsed + ' ms';
+        }
+
+        consoleBox.innerText = JSON.stringify(data, null, 2);
+      } catch (err) {
+        const elapsed = Math.round(performance.now() - startTime);
+        metricBadge.style.display = 'inline-block';
+        metricBadge.className = 'metric-tag metric-error';
+        metricBadge.innerText = 'Network Error · ' + elapsed + ' ms';
+        consoleBox.innerText = 'Failed to fetch: ' + err.message;
+      } finally {
+        sendBtn.disabled = false;
+        sendBtn.innerHTML = '<span>🚀 Send Request via Portkey</span>';
+      }
+    }
+
+    function generateConfig() {
+      const mode = document.getElementById('configMode').value;
+      const primary = document.getElementById('primaryProv').value;
+      const fallback = document.getElementById('fallbackProv').value;
+      const retries = parseInt(document.getElementById('configRetries').value) || 3;
+
+      let cfg;
+      if (mode === 'fallback') {
+        cfg = {
+          strategy: {
+            mode: 'fallback',
+            on_status_codes: [429, 500, 502, 503, 504]
+          },
+          targets: [
+            { provider: primary, override_params: { model: primary === 'openai' ? 'gpt-4o' : 'claude-3-5-sonnet' } },
+            { provider: fallback, override_params: { model: fallback === 'deepseek' ? 'deepseek-chat' : 'gpt-4o' } }
+          ],
+          retry: { attempts: retries }
+        };
+      } else {
+        cfg = {
+          strategy: { mode: 'loadbalance' },
+          targets: [
+            { provider: primary, weight: 0.5 },
+            { provider: fallback, weight: 0.5 }
+          ]
+        };
+      }
+      document.getElementById('configJsonCode').innerText = JSON.stringify(cfg, null, 2);
+    }
+
+    function copyConfig() {
+      const text = document.getElementById('configJsonCode').innerText;
+      navigator.clipboard.writeText(text);
+      alert('Copied x-portkey-config JSON!');
+    }
+
+    function copySnippet(id) {
+      const text = document.getElementById(id).innerText.replace(/https:\/\/YOUR_DOMAIN/g, origin);
+      navigator.clipboard.writeText(text);
+      alert('Code snippet copied to clipboard!');
+    }
+  </script>
+</body>
+</html>`)
+}
+

@@ -44,6 +44,7 @@ export default function RouterDetailPage() {
   const [isDefaultPassword, setIsDefaultPassword] = useState<boolean>(false);
   const [copiedPass, setCopiedPass] = useState(false);
   const [isWiping, setIsWiping] = useState(false);
+  const [isDiscovering, setIsDiscovering] = useState(false);
 
   const loadFull = useCallback(async () => {
     try {
@@ -139,6 +140,22 @@ export default function RouterDetailPage() {
     }
   }
 
+  async function handleDiscoverModels() {
+    setIsDiscovering(true);
+    setErr("");
+    try {
+      const res = await api.post<{ ok: boolean; models_count: number; models: Model[] }>(`/routers/${id}/discover`);
+      if (res && res.models) {
+        setModels(res.models);
+      }
+      await loadFull();
+    } catch (e: any) {
+      setErr(e.message || "Failed to discover models");
+    } finally {
+      setIsDiscovering(false);
+    }
+  }
+
   function copyPassword() {
     if (!initialPassword) return;
     navigator.clipboard.writeText(initialPassword);
@@ -225,7 +242,9 @@ export default function RouterDetailPage() {
               )}
               {(panelUrl || realtime.nativePanelUrl) && (
                 <div className="flex items-center gap-2 flex-wrap pt-1">
-                  <span className="font-medium text-slate-600 dark:text-slate-300">Native Dashboard:</span>
+                  <span className="font-medium text-slate-600 dark:text-slate-300">
+                    Native Dashboard:
+                  </span>
                   {isRunning || currentRuntime === "running" ? (
                     <>
                       <a
@@ -504,23 +523,48 @@ export default function RouterDetailPage() {
 
         {/* Models */}
         <div className="card shadow-md p-5 border border-black/10 dark:border-white/10 flex flex-col">
-          <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-            <span>🤖</span>
-            <span>Discovered AI Models</span>
-          </h2>
-          <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-            {realtime.providersCount || r.providers_count} {(realtime.providersCount || r.providers_count) === 1 ? "provider" : "providers"} · {realtime.modelsCount || r.models_count} models discovered
-          </p>
+          <div className="flex items-center justify-between gap-2 flex-wrap pb-3 border-b border-black/5 dark:border-white/5">
+            <div>
+              <h2 className="text-sm font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                <span>🤖</span>
+                <span>Discovered AI Models</span>
+              </h2>
+              <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                {realtime.providersCount || r.providers_count} {(realtime.providersCount || r.providers_count) === 1 ? "provider" : "providers"} · {models.length || realtime.modelsCount || r.models_count} models discovered
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={isDiscovering || (!isRunning && currentRuntime !== "running")}
+              onClick={handleDiscoverModels}
+              className="btn-secondary text-xs flex items-center gap-1.5 py-1 px-2.5 shadow-sm font-medium"
+              title="Query router /v1/models to discover all configured AI models"
+            >
+              <span className={isDiscovering ? "animate-spin inline-block" : ""}>🔄</span>
+              <span>{isDiscovering ? "Discovering…" : "Discover Models"}</span>
+            </button>
+          </div>
 
           <div className="mt-4 max-h-72 overflow-y-auto space-y-1.5 flex-1 pr-1">
             {models.length === 0 ? (
-              <p className="text-xs text-slate-400 italic py-6 text-center">
-                No models discovered yet. Start the router and click &quot;Discover Models&quot;.
-              </p>
+              <div className="py-6 text-center">
+                <p className="text-xs text-slate-400 italic">
+                  No models discovered yet. Click &quot;Discover Models&quot; to query this router.
+                </p>
+                <button
+                  type="button"
+                  disabled={isDiscovering || (!isRunning && currentRuntime !== "running")}
+                  onClick={handleDiscoverModels}
+                  className="mt-3 btn-primary text-xs inline-flex items-center gap-1.5 py-1 px-3"
+                >
+                  <span className={isDiscovering ? "animate-spin inline-block" : ""}>🔄</span>
+                  <span>{isDiscovering ? "Querying Router..." : "Discover Models Now"}</span>
+                </button>
+              </div>
             ) : (
               models.map((m) => (
                 <div
-                  key={m.id}
+                  key={m.id || m.model_id}
                   className="flex items-center justify-between rounded-lg bg-black/5 dark:bg-white/5 px-3 py-2 text-xs border border-black/5 dark:border-white/5 hover:border-brand/40 transition"
                 >
                   <span className="font-mono font-medium text-slate-800 dark:text-slate-200">{m.model_id}</span>

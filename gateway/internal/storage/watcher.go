@@ -24,10 +24,33 @@ type VolumeWatcher struct {
 	closeOnce    sync.Once
 }
 
+var ignoredExtensions = []string{
+	"-wal",
+	"-shm",
+	".journal",
+	".lock",
+	".tmp",
+	".crswap",
+	".swp",
+}
+
+func shouldIgnoreFile(path string) bool {
+	base := filepath.Base(path)
+	if len(base) > 0 && base[0] == '.' {
+		return true
+	}
+	for _, ext := range ignoredExtensions {
+		if len(path) >= len(ext) && path[len(path)-len(ext):] == ext {
+			return true
+		}
+	}
+	return false
+}
+
 // NewVolumeWatcher creates a new volume watcher for localDir with a configurable debounce duration.
 func NewVolumeWatcher(bridge *FastVolumeBridge, localDir, s3Key string, debounceTime time.Duration) (*VolumeWatcher, error) {
 	if debounceTime <= 0 {
-		debounceTime = 800 * time.Millisecond
+		debounceTime = 5 * time.Second
 	}
 
 	w, err := fsnotify.NewWatcher()
@@ -79,6 +102,11 @@ func (vw *VolumeWatcher) eventLoop(ctx context.Context) {
 		case event, ok := <-vw.watcher.Events:
 			if !ok {
 				return
+			}
+
+			// Filter out temporary/journal/WAL files to prevent constant disk I/O lockup
+			if shouldIgnoreFile(event.Name) {
+				continue
 			}
 
 			// If a new directory was created, add it to watcher

@@ -89,10 +89,15 @@ func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []stri
 
 	envMap := make(map[string]string)
 
-	// 1. Mandatory Baseline Defaults
+	// 1. Mandatory Baseline & High-Performance Multi-Core Defaults
 	envMap["NODE_ENV"] = "production"
 	envMap["PORT"] = port
 	envMap["DATA_DIR"] = dataPath
+	envMap["NODE_OPTIONS"] = "--max-old-space-size=8192"
+	envMap["UV_THREADPOOL_SIZE"] = "64"
+	envMap["WEB_CONCURRENCY"] = "8"
+	envMap["GOMAXPROCS"] = "12"
+	envMap["GOMEMLIMIT"] = "8GiB"
 	// NOTE: Do NOT inject BASE_PATH/PREFIX/PUBLIC_URL/BASE_URL here.
 	// OmniRoute is a pre-built Next.js standalone server that ignores runtime
 	// base path changes (basePath is compiled into next.config.js at build time).
@@ -138,9 +143,9 @@ func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []stri
 // Overridable via router config["resource_limits"].
 func (OmniRouteAdapter) ResourceLimits(r *store.Router) ContainerResources {
 	res := ContainerResources{
-		MemoryBytes: 4 * 1024 * 1024 * 1024, // 4 GB RAM
-		NanoCPUs:    4_000_000_000,           // 4 CPUs
-		PidsLimit:   1024,
+		MemoryBytes: 8 * 1024 * 1024 * 1024, // 8 GB RAM (host has 24 GB shared)
+		NanoCPUs:    12_000_000_000,         // 12 CPUs (host has 12 cores shared)
+		PidsLimit:   4096,
 	}
 	if lim, ok := r.Config["resource_limits"].(map[string]any); ok {
 		if mb, ok := lim["memory_mb"].(float64); ok && mb > 0 {

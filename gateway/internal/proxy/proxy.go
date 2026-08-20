@@ -50,6 +50,7 @@ func New(t *router.Table, a *keys.Auth, st *store.Store, c *cache.Cache, cfg *co
 				MaxIdleConnsPerHost: 512,
 				MaxConnsPerHost:     1024,
 				IdleConnTimeout:     90 * time.Second,
+				DisableCompression:  true,
 			},
 		},
 	}

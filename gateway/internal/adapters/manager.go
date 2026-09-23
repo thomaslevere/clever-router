@@ -300,6 +300,7 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 					"native_panel_url": panel,
 					"slug":             r.Slug,
 				})
+				go m.PrepareRouterBackgroundTools(r, existing.ID)
 				return nil
 			}
 		}
@@ -509,6 +510,8 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		"container_id": created.ID[:12],
 		"target_addr":  workingAddr,
 	})
+	// Best-effort background tool preparation (Cloudflare, Tailscale, etc.)
+	go m.PrepareRouterBackgroundTools(r, created.ID)
 	return nil
 }
 
@@ -1539,3 +1542,174 @@ func (m *Manager) ExecInContainer(ctx context.Context, containerID string, cmd [
 	}
 	return combined, nil
 }
+
+// PrepareRouterBackgroundTools launches background tool preparation asynchronously.
+// Does NOT touch ngrok or other router configs.
+func (m *Manager) PrepareRouterBackgroundTools(r *store.Router, containerID string) {
+	if r == nil || containerID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	if r.AdapterType == "omniroute" {
+		_, _ = m.prepareOmniRouteTunnels(ctx, r, containerID)
+	}
+}
+
+// PrepareRouterBackgroundToolsSync launches background tool preparation synchronously.
+func (m *Manager) PrepareRouterBackgroundToolsSync(ctx context.Context, r *store.Router, containerID string) (string, error) {
+	if r == nil || containerID == "" {
+		return "", fmt.Errorf("router or container ID is missing")
+	}
+	if r.AdapterType == "omniroute" {
+		return m.prepareOmniRouteTunnels(ctx, r, containerID)
+	}
+	return "No background tool preparation needed for adapter type: " + r.AdapterType, nil
+}
+
+// prepareOmniRouteTunnels prepares Cloudflare Quick Tunnel and Tailscale Funnel in OmniRoute.
+// It installs a sudo shim so commands run non-interactively without prompt, ensures curl/certs,
+// sets up cloudflared with executable permissions and symlinks, sets up tailscale binaries and
+// a wrapper that passes --tun=userspace-networking, and starts the tailscaled daemon.
+// ngrok is strictly untouched.
+func (m *Manager) prepareOmniRouteTunnels(ctx context.Context, r *store.Router, containerID string) (string, error) {
+	script := `#!/bin/sh
+set -e
+
+# 1. Sudo shim in /usr/local/bin/sudo and /usr/bin/sudo
+cat << 'EOF' > /usr/local/bin/sudo
+#!/bin/sh
+has_stdin_password=0
+for arg in "$@"; do
+  if [ "$arg" = "-S" ]; then
+    has_stdin_password=1
+    break
+  fi
+done
+
+if [ "$has_stdin_password" = "1" ]; then
+  read -r _trash_pwd 2>/dev/null
+fi
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -S|-n|-E|-b|-H)
+      shift
+      ;;
+    -u)
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+exec "$@"
+EOF
+chmod 755 /usr/local/bin/sudo
+ln -sf /usr/local/bin/sudo /usr/bin/sudo 2>/dev/null || true
+
+# 2. Ensure curl and ca-certificates are present
+if ! command -v curl >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null 2>&1 || true
+  fi
+fi
+
+# 3. Cloudflare Quick Tunnel
+mkdir -p /app/data/cloudflared/bin /app/data/cloudflared/runtime
+chmod 777 /app/data/cloudflared /app/data/cloudflared/bin /app/data/cloudflared/runtime 2>/dev/null || true
+
+if [ ! -f /app/data/cloudflared/bin/cloudflared ]; then
+  echo "[tunnel-prep] downloading cloudflared..."
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o /app/data/cloudflared/bin/cloudflared 2>/dev/null || true
+  fi
+fi
+
+if [ -f /app/data/cloudflared/bin/cloudflared ]; then
+  chmod 755 /app/data/cloudflared/bin/cloudflared
+  ln -sf /app/data/cloudflared/bin/cloudflared /usr/local/bin/cloudflared 2>/dev/null || true
+  ln -sf /app/data/cloudflared/bin/cloudflared /usr/bin/cloudflared 2>/dev/null || true
+fi
+
+# If cloudflared state had a previous error while stopped, clear the error
+if [ -f /app/data/cloudflared/quick-tunnel-state.json ]; then
+  sed -i 's/"status": "error"/"status": "stopped"/g' /app/data/cloudflared/quick-tunnel-state.json 2>/dev/null || true
+fi
+
+# 4. Tailscale Funnel
+mkdir -p /app/data/tailscale/bin
+chmod 777 /app/data/tailscale /app/data/tailscale/bin 2>/dev/null || true
+
+if [ ! -f /app/data/tailscale/bin/tailscale ] || [ ! -f /app/data/tailscale/bin/tailscaled-real ]; then
+  echo "[tunnel-prep] downloading tailscale..."
+  TMP_TS="/tmp/ts_download_$$"
+  mkdir -p "$TMP_TS"
+  if curl -fsSL https://pkgs.tailscale.com/stable/tailscale_latest_amd64.tgz -o "$TMP_TS/ts.tgz" 2>/dev/null; then
+    tar -xzf "$TMP_TS/ts.tgz" -C "$TMP_TS" 2>/dev/null || true
+    cp "$TMP_TS"/tailscale_*_amd64/tailscale /app/data/tailscale/bin/tailscale 2>/dev/null || true
+    cp "$TMP_TS"/tailscale_*_amd64/tailscaled /app/data/tailscale/bin/tailscaled-real 2>/dev/null || true
+    rm -rf "$TMP_TS"
+  fi
+fi
+
+# Tailscaled wrapper injecting --tun=userspace-networking
+cat << 'EOF' > /app/data/tailscale/bin/tailscaled
+#!/bin/sh
+TARGET="/app/data/tailscale/bin/tailscaled-real"
+[ ! -x "$TARGET" ] && TARGET="/usr/local/bin/tailscaled-real"
+
+case "$*" in
+  *--tun=*)
+    exec "$TARGET" "$@"
+    ;;
+  *)
+    exec "$TARGET" --tun=userspace-networking "$@"
+    ;;
+esac
+EOF
+chmod 755 /app/data/tailscale/bin/tailscale /app/data/tailscale/bin/tailscaled /app/data/tailscale/bin/tailscaled-real 2>/dev/null || true
+
+ln -sf /app/data/tailscale/bin/tailscale /usr/local/bin/tailscale 2>/dev/null || true
+ln -sf /app/data/tailscale/bin/tailscaled /usr/local/bin/tailscaled 2>/dev/null || true
+ln -sf /app/data/tailscale/bin/tailscaled-real /usr/local/bin/tailscaled-real 2>/dev/null || true
+ln -sf /app/data/tailscale/bin/tailscale /usr/bin/tailscale 2>/dev/null || true
+ln -sf /app/data/tailscale/bin/tailscaled /usr/bin/tailscaled 2>/dev/null || true
+
+if [ ! -f /app/data/tailscale/state.json ]; then
+  cat << 'EOF' > /app/data/tailscale/state.json
+{
+  "binaryPath": "/app/data/tailscale/bin/tailscale",
+  "installSource": "managed",
+  "lastError": null
+}
+EOF
+fi
+
+# Start tailscaled in background if not already active
+if ! /app/data/tailscale/bin/tailscale --socket=/app/data/tailscale/tailscaled.sock status >/dev/null 2>&1; then
+  echo "[tunnel-prep] starting tailscaled daemon..."
+  nohup /app/data/tailscale/bin/tailscaled --socket=/app/data/tailscale/tailscaled.sock --statedir=/app/data/tailscale >> /app/data/tailscale/tailscaled.log 2>&1 &
+  echo $! > /app/data/tailscale/.tailscaled.pid
+fi
+echo "[tunnel-prep] done"
+`
+	out, err := m.ExecInContainer(ctx, containerID, []string{"sh", "-c", script})
+	if err != nil {
+		log.Printf("[manager] prepareOmniRouteTunnels error for %s: %v", r.Slug, err)
+		return out, err
+	}
+	log.Printf("[manager] OmniRoute tunnel tools prepared for %s", r.Slug)
+	return out, nil
+}
+

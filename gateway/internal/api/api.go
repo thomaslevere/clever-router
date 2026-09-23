@@ -267,6 +267,7 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 	g.GET("/routers/:id/logs", a.logsRouter)
 	g.POST("/routers/:id/exec", a.execRouter)
 	g.POST("/routers/:id/repair-sqlite", a.repairSQLiteRouter)
+	g.POST("/routers/:id/prepare-tunnels", a.prepareTunnelsRouter)
 
 	// Credentials — GAP-5 FIX: scoped under /routers/:id/credentials/:provider
 	// for consistent REST semantics and traceable audit entries.
@@ -1114,6 +1115,20 @@ try {
 		return
 	}
 	c.JSON(200, gin.H{"ok": true, "output": out})
+}
+
+func (a *API) prepareTunnelsRouter(c *gin.Context) {
+	r, err := a.findRouter(c, c.Param("id"))
+	if err != nil || r.ContainerID == "" {
+		c.JSON(404, gin.H{"error": "router container not running"})
+		return
+	}
+	out, err := a.manager.PrepareRouterBackgroundToolsSync(c.Request.Context(), r, r.ContainerID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error(), "output": out})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "message": "Tunnel tools prepared successfully", "output": out})
 }
 
 // ----- credentials -----

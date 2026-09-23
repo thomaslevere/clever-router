@@ -1644,7 +1644,7 @@ fi
 
 # If cloudflared state had a previous error while stopped, clear the error
 if [ -f /app/data/cloudflared/quick-tunnel-state.json ]; then
-  sed -i 's/"status": "error"/"status": "stopped"/g' /app/data/cloudflared/quick-tunnel-state.json 2>/dev/null || true
+  node -e 'const fs=require("fs"); const f="/app/data/cloudflared/quick-tunnel-state.json"; try { const d=JSON.parse(fs.readFileSync(f)); if (d.status!=="running") { d.status="stopped"; d.lastError=null; fs.writeFileSync(f, JSON.stringify(d, null, 2)); } } catch(e){}' 2>/dev/null || true
 fi
 
 # 4. Tailscale Funnel

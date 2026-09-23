@@ -108,6 +108,9 @@ func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []stri
 	// Do NOT set WEB_CONCURRENCY: OmniRoute uses SQLite-on-disk which cannot handle
 	// multi-process cluster concurrency without lock contention and index corruption.
 	// Single-process with UV_THREADPOOL_SIZE=64 scales async I/O cleanly across all 12 cores.
+	// Default Cloudflare Quick Tunnel to reliable TCP http2 protocol instead of QUIC (which drops on UDP-restricted VMs)
+	envMap["CLOUDFLARED_PROTOCOL"] = "http2"
+	envMap["TUNNEL_TRANSPORT_PROTOCOL"] = "http2"
 	// NOTE: Do NOT inject BASE_PATH/PREFIX/PUBLIC_URL/BASE_URL here.
 	// OmniRoute is a pre-built Next.js standalone server that ignores runtime
 	// base path changes (basePath is compiled into next.config.js at build time).

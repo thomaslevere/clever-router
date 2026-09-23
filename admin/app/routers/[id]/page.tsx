@@ -45,6 +45,7 @@ export default function RouterDetailPage() {
   const [copiedPass, setCopiedPass] = useState(false);
   const [isWiping, setIsWiping] = useState(false);
   const [isDiscovering, setIsDiscovering] = useState(false);
+  const [isPreparingTunnels, setIsPreparingTunnels] = useState(false);
 
   const loadFull = useCallback(async () => {
     try {
@@ -153,6 +154,20 @@ export default function RouterDetailPage() {
       setErr(e.message || "Failed to discover models");
     } finally {
       setIsDiscovering(false);
+    }
+  }
+
+  async function handlePrepareTunnels() {
+    setIsPreparingTunnels(true);
+    setErr("");
+    try {
+      const res = await api.post<{ ok: boolean; message: string; output: string }>(`/routers/${id}/prepare-tunnels`);
+      alert(res.message || "Tunnels prepared successfully!");
+      await loadFull();
+    } catch (e: any) {
+      setErr(e.message || "Failed to prepare tunnels");
+    } finally {
+      setIsPreparingTunnels(false);
     }
   }
 
@@ -321,6 +336,19 @@ export default function RouterDetailPage() {
               {realtime.busyAction === "discover" && <span className="inline-block animate-spin text-xs">🔍</span>}
               <span>{realtime.busyAction === "discover" ? "Discovering…" : "🔍 Discover Models"}</span>
             </button>
+
+            {/* Prepare Tunnels (OmniRoute) */}
+            {r.adapter_type === "omniroute" && (
+              <button
+                className="btn-ghost text-xs flex items-center gap-1.5 transition-all text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/10"
+                disabled={!isRunning || isStarting || isStopping || isWiping || isPreparingTunnels}
+                onClick={handlePrepareTunnels}
+                title="Prepare Cloudflare Quick Tunnel and Tailscale Funnel CLI tools"
+              >
+                {isPreparingTunnels && <span className="inline-block animate-spin text-xs">⏳</span>}
+                <span>{isPreparingTunnels ? "Preparing…" : "🚇 Prepare Tunnels"}</span>
+              </button>
+            )}
 
             {/* Delete Router Button */}
             <button

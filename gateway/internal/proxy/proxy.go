@@ -504,22 +504,13 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 			}
 		}
 	} else {
-		// Non-streaming: stream chunks immediately while sniffing usage, avoiding full body buffering latency
-		tee := io.TeeReader(resp.Body, sc)
-		buf := make([]byte, 32*1024)
-		for {
-			n, rerr := tee.Read(buf)
-			if n > 0 {
-				if _, werr := c.Writer.Write(buf[:n]); werr != nil {
-					break
-				}
-				if flusher != nil {
-					flusher.Flush()
-				}
-			}
-			if rerr != nil {
-				break
-			}
+		// Non-streaming: stream directly to client, avoiding premature flusher.Flush() overhead
+		// on every 32KB chunk (which fragments TCP packets and severely degrades throughput for large JSON responses).
+		if model != "" {
+			tee := io.TeeReader(resp.Body, sc)
+			_, _ = io.Copy(c.Writer, tee)
+		} else {
+			_, _ = io.Copy(c.Writer, resp.Body)
 		}
 	}
 

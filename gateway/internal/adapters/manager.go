@@ -927,16 +927,50 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 		return err
 	}
 
-	// 1. Inspect Docker container if containerID or targetAddr is missing or needs rediscovery
-	cName := containerPrefix + r.Slug
-	if cInspect, err := m.docker.ContainerInspect(ctx, cName); err == nil && cInspect.State != nil && cInspect.State.Running {
-		r.ContainerID = cInspect.ID
-		if workingAddr, ok := m.checkAnyWorking(ctx, cInspect.ID, ad.InternalPort(r), ad.HealthPath(r)); ok {
-			r.TargetAddr = workingAddr
+	targetAddr := r.TargetAddr
+	probeClient := &http.Client{Timeout: 1500 * time.Millisecond}
+	var probeErr error
+	var latency int64
+
+	// 1. Fast probe existing TargetAddr if already assigned.
+	if targetAddr != "" {
+		url := strings.TrimRight(targetAddr, "/") + ad.HealthPath(r)
+		start := time.Now()
+		req, reqErr := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if reqErr == nil {
+			resp, err := probeClient.Do(req)
+			latency = time.Since(start).Milliseconds()
+			if err != nil || (resp != nil && resp.StatusCode >= 500) {
+				if resp != nil {
+					resp.Body.Close()
+					probeErr = fmt.Errorf("status %d", resp.StatusCode)
+				} else {
+					probeErr = err
+				}
+			} else if resp != nil {
+				resp.Body.Close()
+				probeErr = nil
+			}
+		} else {
+			probeErr = reqErr
+		}
+	} else {
+		probeErr = fmt.Errorf("no target address")
+	}
+
+	// 2. Only inspect Docker container and scan candidates if targetAddr was empty or the direct probe failed.
+	if probeErr != nil {
+		cName := containerPrefix + r.Slug
+		if cInspect, err := m.docker.ContainerInspect(ctx, cName); err == nil && cInspect.State != nil && cInspect.State.Running {
+			r.ContainerID = cInspect.ID
+			if workingAddr, ok := m.checkAnyWorking(ctx, cInspect.ID, ad.InternalPort(r), ad.HealthPath(r)); ok {
+				targetAddr = workingAddr
+				probeErr = nil
+			}
 		}
 	}
 
-	if r.TargetAddr == "" {
+	if targetAddr == "" {
 		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", 0, "no target address")
 		_ = m.store.UpdateRouterState(ctx, r.ID, "stopped", "", "", "", "unknown")
 		m.table.Delete(r.Slug)
@@ -947,41 +981,6 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 			"slug":          r.Slug,
 		})
 		return fmt.Errorf("no target address")
-	}
-
-	targetAddr := r.TargetAddr
-	url := strings.TrimRight(targetAddr, "/") + ad.HealthPath(r)
-	start := time.Now()
-
-	// Probe current targetAddr (HTTP < 500 indicates server is alive)
-	probeClient := &http.Client{Timeout: 3 * time.Second}
-	req, reqErr := http.NewRequestWithContext(ctx, "GET", url, nil)
-	var probeErr error
-	var latency int64
-
-	if reqErr == nil {
-		resp, err := probeClient.Do(req)
-		latency = time.Since(start).Milliseconds()
-		if err != nil || (resp != nil && resp.StatusCode >= 500) {
-			if resp != nil {
-				resp.Body.Close()
-				probeErr = fmt.Errorf("status %d", resp.StatusCode)
-			} else {
-				probeErr = err
-			}
-		} else if resp != nil {
-			resp.Body.Close()
-		}
-	} else {
-		probeErr = reqErr
-	}
-
-	// If current targetAddr failed, attempt automatic failover to other working candidate IPs
-	if probeErr != nil && r.ContainerID != "" {
-		if newWorkingAddr, ok := m.checkAnyWorking(ctx, r.ContainerID, ad.InternalPort(r), ad.HealthPath(r)); ok {
-			targetAddr = newWorkingAddr
-			probeErr = nil
-		}
 	}
 
 	if probeErr != nil {
@@ -999,20 +998,23 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 
 	_ = m.store.InsertHealthCheck(ctx, r.ID, "healthy", int(latency), "")
 	panel := fmt.Sprintf("/%s%s", r.Slug, ad.NativePanelPath(r))
-	_ = m.store.UpdateRouterState(ctx, r.ID, "running", targetAddr, r.ContainerID, panel, "healthy")
-	_ = m.store.SetDesiredState(ctx, r.ID, "running")
-	_ = m.cache.SetRoute(ctx, r.Slug, targetAddr)
 	m.table.Set(r.Slug, targetAddr)
 
-	m.emitEvent(r.ID, "state_changed", map[string]any{
-		"status":           "running",
-		"health_status":    "healthy",
-		"runtime_state":    "running",
-		"desired_state":    "running",
-		"target_addr":      targetAddr,
-		"native_panel_url": panel,
-		"slug":             r.Slug,
-	})
+	// Avoid redundant database and cache writes if state and target address are unchanged.
+	if r.HealthStatus != "healthy" || r.RuntimeState != "running" || r.TargetAddr != targetAddr {
+		_ = m.store.UpdateRouterState(ctx, r.ID, "running", targetAddr, r.ContainerID, panel, "healthy")
+		_ = m.store.SetDesiredState(ctx, r.ID, "running")
+		_ = m.cache.SetRoute(ctx, r.Slug, targetAddr)
+		m.emitEvent(r.ID, "state_changed", map[string]any{
+			"status":           "running",
+			"health_status":    "healthy",
+			"runtime_state":    "running",
+			"desired_state":    "running",
+			"target_addr":      targetAddr,
+			"native_panel_url": panel,
+			"slug":             r.Slug,
+		})
+	}
 	return nil
 }
 

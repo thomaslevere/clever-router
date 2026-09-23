@@ -29,13 +29,13 @@ func (OmniRouteAdapter) InternalPort(r *store.Router) int {
 }
 
 // HealthPath returns a lightweight path used only for readiness probes.
-// OmniRoute doesn't have a dedicated /health, so /v1/models doubles as the
-// readiness signal — it's the same endpoint as ModelsPath intentionally.
+// OmniRoute includes a native /healthz route that responds immediately with 'ok'
+// and zero database/auth overhead.
 func (OmniRouteAdapter) HealthPath(r *store.Router) string {
 	if p := strConfig(r, "health_path"); p != "" {
 		return p
 	}
-	return "/v1/models"
+	return "/healthz"
 }
 
 // ModelsPath is the OpenAI-compatible model listing endpoint.
@@ -93,8 +93,18 @@ func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []stri
 	envMap["NODE_ENV"] = "production"
 	envMap["PORT"] = port
 	envMap["DATA_DIR"] = dataPath
-	envMap["NODE_OPTIONS"] = "--max-old-space-size=8192"
+	// Allocate up to 16 GB heap from the 24 GB host RAM.
+	// OMNIROUTE_MEMORY_MB is required because dev/run-standalone.mjs appends
+	// --max-old-space-size=<OMNIROUTE_MEMORY_MB> last, overriding NODE_OPTIONS.
+	envMap["OMNIROUTE_MEMORY_MB"] = "16384"
+	envMap["NODE_OPTIONS"] = "--max-old-space-size=16384"
 	envMap["UV_THREADPOOL_SIZE"] = "64"
+	// Disable OmniRoute's internal synchronous full-database file copies on startup/pricing sync.
+	envMap["DISABLE_SQLITE_AUTO_BACKUP"] = "true"
+	// Raise model concurrency cap from 3 to 32 for high throughput across all 12 CPU cores.
+	envMap["COMBO_CONCURRENCY_PER_MODEL"] = "32"
+	// Disable background periodic sweeps on 359 provider keys to prevent CPU & DB lock storms.
+	envMap["OMNIROUTE_DISABLE_CREDENTIAL_HEALTH_CHECK"] = "true"
 	// Do NOT set WEB_CONCURRENCY: OmniRoute uses SQLite-on-disk which cannot handle
 	// multi-process cluster concurrency without lock contention and index corruption.
 	// Single-process with UV_THREADPOOL_SIZE=64 scales async I/O cleanly across all 12 cores.

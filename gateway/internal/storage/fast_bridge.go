@@ -568,3 +568,24 @@ func (b *FastVolumeBridge) SnapshotContainer(ctx context.Context, cli *client.Cl
 	log.Printf("[fast-bridge] streamed snapshot (%d files -> %d zstd bytes) from container %s:%s -> s3://%s/%s", fileCount, len(payload), containerID[:12], srcDir, b.bucket, s3Key)
 	return nil
 }
+
+// CopyS3Object duplicates an existing snapshot key inside the bucket server-side in milliseconds,
+// avoiding any re-reading or re-tarring of container directories.
+func (b *FastVolumeBridge) CopyS3Object(ctx context.Context, srcKey, dstKey string) error {
+	if b.client == nil || srcKey == "" || dstKey == "" || srcKey == dstKey {
+		return nil
+	}
+	srcOpts := minio.CopySrcOptions{
+		Bucket: b.bucket,
+		Object: srcKey,
+	}
+	dstOpts := minio.CopyDestOptions{
+		Bucket: b.bucket,
+		Object: dstKey,
+	}
+	_, err := b.client.CopyObject(ctx, dstOpts, srcOpts)
+	if err != nil {
+		return fmt.Errorf("copy S3 object %s -> %s: %w", srcKey, dstKey, err)
+	}
+	return nil
+}

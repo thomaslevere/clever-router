@@ -265,6 +265,8 @@ func (a *API) registerAdmin(g *gin.RouterGroup) {
 	g.GET("/routers/:id/health", a.healthRouter)
 	g.GET("/routers/:id/models", a.listModels)
 	g.GET("/routers/:id/logs", a.logsRouter)
+	g.POST("/routers/:id/exec", a.execRouter)
+	g.POST("/routers/:id/repair-sqlite", a.repairSQLiteRouter)
 
 	// Credentials — GAP-5 FIX: scoped under /routers/:id/credentials/:provider
 	// for consistent REST semantics and traceable audit entries.
@@ -1057,6 +1059,61 @@ func (a *API) logsRouter(c *gin.Context) {
 		_, _ = w.Write(buf[:n])
 		return true
 	})
+}
+
+type execReq struct {
+	Cmd []string `json:"cmd" binding:"required"`
+}
+
+func (a *API) execRouter(c *gin.Context) {
+	r, err := a.findRouter(c, c.Param("id"))
+	if err != nil || r.ContainerID == "" {
+		c.JSON(404, gin.H{"error": "router container not running"})
+		return
+	}
+	var req execReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": "invalid command format; requires cmd array"})
+		return
+	}
+	out, err := a.manager.ExecInContainer(c.Request.Context(), r.ContainerID, req.Cmd)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error(), "output": out})
+		return
+	}
+	c.JSON(200, gin.H{"output": out})
+}
+
+func (a *API) repairSQLiteRouter(c *gin.Context) {
+	r, err := a.findRouter(c, c.Param("id"))
+	if err != nil || r.ContainerID == "" {
+		c.JSON(404, gin.H{"error": "router container not running"})
+		return
+	}
+
+	cmd := []string{
+		"sh", "-c",
+		`sqlite3 /app/data/storage.sqlite "PRAGMA wal_checkpoint(TRUNCATE); REINDEX; PRAGMA integrity_check;" 2>/dev/null || node -e '
+try {
+	const Database = require("better-sqlite3");
+	const db = new Database("/app/data/storage.sqlite");
+	console.log("integrity before:", db.pragma("integrity_check"));
+	db.exec("REINDEX;");
+	db.pragma("wal_checkpoint(TRUNCATE);");
+	console.log("integrity after:", db.pragma("integrity_check"));
+	console.log("REINDEX and WAL checkpoint completed successfully.");
+} catch(err) {
+	console.error("better-sqlite3 error:", err);
+}
+'`,
+	}
+
+	out, err := a.manager.ExecInContainer(c.Request.Context(), r.ContainerID, cmd)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error(), "output": out})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true, "output": out})
 }
 
 // ----- credentials -----

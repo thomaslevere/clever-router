@@ -89,15 +89,15 @@ func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []stri
 
 	envMap := make(map[string]string)
 
-	// 1. Mandatory Baseline & High-Performance Multi-Core Defaults
+	// 1. Mandatory Baseline & High-Performance Single-Process Defaults
 	envMap["NODE_ENV"] = "production"
 	envMap["PORT"] = port
 	envMap["DATA_DIR"] = dataPath
 	envMap["NODE_OPTIONS"] = "--max-old-space-size=8192"
 	envMap["UV_THREADPOOL_SIZE"] = "64"
-	envMap["WEB_CONCURRENCY"] = "8"
-	envMap["GOMAXPROCS"] = "12"
-	envMap["GOMEMLIMIT"] = "8GiB"
+	// Do NOT set WEB_CONCURRENCY: OmniRoute uses SQLite-on-disk which cannot handle
+	// multi-process cluster concurrency without lock contention and index corruption.
+	// Single-process with UV_THREADPOOL_SIZE=64 scales async I/O cleanly across all 12 cores.
 	// NOTE: Do NOT inject BASE_PATH/PREFIX/PUBLIC_URL/BASE_URL here.
 	// OmniRoute is a pre-built Next.js standalone server that ignores runtime
 	// base path changes (basePath is compiled into next.config.js at build time).
@@ -140,12 +140,14 @@ func (OmniRouteAdapter) Env(r *store.Router, decrypted map[string]string) []stri
 }
 
 // ResourceLimits returns sensible defaults for an OmniRoute container.
+// By default, NanoCPUs: 0 and MemoryBytes: 0 allow unconstrained bursting across all 12 CPU cores
+// and 24 GB RAM, eliminating Linux CFS CPU quota period throttling (100ms jitter freezes).
 // Overridable via router config["resource_limits"].
 func (OmniRouteAdapter) ResourceLimits(r *store.Router) ContainerResources {
 	res := ContainerResources{
-		MemoryBytes: 8 * 1024 * 1024 * 1024, // 8 GB RAM (host has 24 GB shared)
-		NanoCPUs:    12_000_000_000,         // 12 CPUs (host has 12 cores shared)
-		PidsLimit:   4096,
+		MemoryBytes: 0,    // 0 = unlimited (allows container full access to 24 GB host RAM)
+		NanoCPUs:    0,    // 0 = unlimited (avoids Linux CFS CPU quota period throttling)
+		PidsLimit:   8192,
 	}
 	if lim, ok := r.Config["resource_limits"].(map[string]any); ok {
 		if mb, ok := lim["memory_mb"].(float64); ok && mb > 0 {

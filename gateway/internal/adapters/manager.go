@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 )
 
@@ -577,10 +579,9 @@ func (m *Manager) Snapshot(ctx context.Context, r *store.Router) error {
 		s3KeyID := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
 		if err := m.bridge.SnapshotContainer(ctx, m.docker, r.ContainerID, targetVol, s3KeyID); err != nil {
 			log.Printf("[manager] snapshot warning for %s (%s): %v", r.Slug, s3KeyID, err)
-		}
-		if r.Slug != "" && r.Slug != r.ID {
+		} else if r.Slug != "" && r.Slug != r.ID {
 			s3KeySlug := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.Slug, sanitized)
-			_ = m.bridge.SnapshotContainer(ctx, m.docker, r.ContainerID, targetVol, s3KeySlug)
+			_ = m.bridge.CopyS3Object(ctx, s3KeyID, s3KeySlug)
 		}
 	}
 	return nil
@@ -1503,4 +1504,36 @@ func deriveModelsFromCreds(r *store.Router, creds map[string]string) []store.Mod
 		}
 	}
 	return out
+}
+
+// ExecInContainer executes a command inside a running router container and returns combined output.
+func (m *Manager) ExecInContainer(ctx context.Context, containerID string, cmd []string) (string, error) {
+	if m.docker == nil || containerID == "" {
+		return "", fmt.Errorf("docker client or container ID unavailable")
+	}
+	execCreate, err := m.docker.ContainerExecCreate(ctx, containerID, dockertypes.ExecConfig{
+		Cmd:          cmd,
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("create exec: %w", err)
+	}
+
+	resp, err := m.docker.ContainerExecAttach(ctx, execCreate.ID, dockertypes.ExecStartCheck{})
+	if err != nil {
+		return "", fmt.Errorf("attach exec: %w", err)
+	}
+	defer resp.Close()
+
+	var stdout, stderr bytes.Buffer
+	_, _ = stdcopy.StdCopy(&stdout, &stderr, resp.Reader)
+	combined := stdout.String()
+	if stderr.Len() > 0 {
+		if combined != "" {
+			combined += "\n"
+		}
+		combined += stderr.String()
+	}
+	return combined, nil
 }

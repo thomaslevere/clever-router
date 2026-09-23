@@ -504,11 +504,22 @@ func (p *Proxy) handleRequest(c *gin.Context) {
 			}
 		}
 	} else {
-		// Non-streaming: buffer, sniff, then write.
-		bufBody, _ := io.ReadAll(io.TeeReader(resp.Body, sc))
-		_, _ = c.Writer.Write(bufBody)
-		if flusher != nil {
-			flusher.Flush()
+		// Non-streaming: stream chunks immediately while sniffing usage, avoiding full body buffering latency
+		tee := io.TeeReader(resp.Body, sc)
+		buf := make([]byte, 32*1024)
+		for {
+			n, rerr := tee.Read(buf)
+			if n > 0 {
+				if _, werr := c.Writer.Write(buf[:n]); werr != nil {
+					break
+				}
+				if flusher != nil {
+					flusher.Flush()
+				}
+			}
+			if rerr != nil {
+				break
+			}
 		}
 	}
 

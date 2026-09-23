@@ -96,11 +96,7 @@ func (c *Checker) tick(ctx context.Context) {
 	}
 	for _, r := range routers {
 		go func(r store.Router) {
-			if err := c.manager.HealthCheck(ctx, &r); err != nil {
-				// failed health check is logged in manager
-			} else {
-				_ = c.manager.Snapshot(ctx, &r)
-			}
+			_ = c.manager.HealthCheck(ctx, &r)
 		}(r)
 	}
 }

@@ -1254,25 +1254,7 @@ func (m *Manager) getCandidates(ctx context.Context, containerID string, port in
 		}
 	}
 
-	// 1. Direct container IP from networks (fastest, direct container-to-container on clever-route-net)
-	if insp.NetworkSettings != nil {
-		for _, n := range insp.NetworkSettings.Networks {
-			if n.IPAddress != "" {
-				addCand(fmt.Sprintf("http://%s:%d", n.IPAddress, port))
-			}
-		}
-		if insp.NetworkSettings.IPAddress != "" {
-			addCand(fmt.Sprintf("http://%s:%d", insp.NetworkSettings.IPAddress, port))
-		}
-	}
-
-	// 2. Container Name DNS (for docker networks)
-	cleanName := strings.TrimPrefix(insp.Name, "/")
-	if cleanName != "" {
-		addCand(fmt.Sprintf("http://%s:%d", cleanName, port))
-	}
-
-	// 3. Published host ports (fallback for host gateways)
+	// 1. Published host ports (MOST RELIABLE when running with mounted Docker socket on Clever Cloud / Docker-out-of-Docker)
 	hostGateways := []string{getDefaultGateway(), gatewayIP, "172.17.0.1", "127.0.0.1", "localhost", "host.docker.internal"}
 	if insp.NetworkSettings != nil && insp.NetworkSettings.Ports != nil {
 		if bindings, ok := insp.NetworkSettings.Ports[internalPort]; ok {
@@ -1284,6 +1266,24 @@ func (m *Manager) getCandidates(ctx context.Context, containerID string, port in
 				}
 			}
 		}
+	}
+
+	// 2. Direct container IP from networks
+	if insp.NetworkSettings != nil {
+		for _, n := range insp.NetworkSettings.Networks {
+			if n.IPAddress != "" {
+				addCand(fmt.Sprintf("http://%s:%d", n.IPAddress, port))
+			}
+		}
+		if insp.NetworkSettings.IPAddress != "" {
+			addCand(fmt.Sprintf("http://%s:%d", insp.NetworkSettings.IPAddress, port))
+		}
+	}
+
+	// 3. Container Name DNS (for docker networks)
+	cleanName := strings.TrimPrefix(insp.Name, "/")
+	if cleanName != "" {
+		addCand(fmt.Sprintf("http://%s:%d", cleanName, port))
 	}
 
 	return candidates

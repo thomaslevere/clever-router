@@ -351,130 +351,230 @@ func (b *FastVolumeBridge) StreamSnapshotToS3(ctx context.Context, sourceDir, s3
 	return nil
 }
 
+// isDatabaseFile returns true if the entry is an essential database or configuration secret file.
+func isDatabaseFile(name string) bool {
+	lower := strings.ToLower(name)
+	base := filepath.Base(lower)
+	if strings.HasSuffix(base, ".sqlite") || strings.HasSuffix(base, ".db") ||
+		strings.HasSuffix(base, ".sqlite3") || base == "server.env" ||
+		strings.HasSuffix(base, ".env") || base == "jwt-secret" ||
+		base == "machine-id" || strings.HasSuffix(base, ".sqlite-wal") ||
+		strings.HasSuffix(base, ".db-wal") || base == "config.yaml" {
+		return true
+	}
+	return false
+}
+
+// inspectSnapshot quickly inspects an S3 archive's tar headers to determine if it exists,
+// its size, and whether it contains database files.
+func (b *FastVolumeBridge) inspectSnapshot(ctx context.Context, s3Key string) (exists bool, size int64, hasDB bool, err error) {
+	if b.client == nil || s3Key == "" {
+		return false, 0, false, nil
+	}
+	obj, err := b.client.GetObject(ctx, b.bucket, s3Key, minio.GetObjectOptions{})
+	if err != nil {
+		return false, 0, false, err
+	}
+	defer obj.Close()
+
+	stat, err := obj.Stat()
+	if err != nil || stat.Size <= 32 {
+		return false, 0, false, nil
+	}
+
+	stream, err := openArchiveStream(obj)
+	if err != nil {
+		return true, stat.Size, false, nil
+	}
+	defer stream.Close()
+
+	tr := tar.NewReader(stream)
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			break
+		}
+		if isDatabaseFile(hdr.Name) {
+			return true, stat.Size, true, nil
+		}
+	}
+	return true, stat.Size, false, nil
+}
+
 // HydrateContainer downloads a snapshot from S3, decompresses it, normalizes all tar UID/GIDs to 0 (root),
 // and copies it directly into the target container directory via Docker API.
 func (b *FastVolumeBridge) HydrateContainer(ctx context.Context, cli *client.Client, containerID, s3Key, targetParentDir string) error {
 	return b.HydrateContainerCandidateKeys(ctx, cli, containerID, []string{s3Key}, targetParentDir)
 }
 
-// HydrateContainerCandidateKeys tries each candidate s3Key in order and extracts the first valid snapshot into the container.
+// HydrateContainerCandidateKeys tries candidate s3Keys, prioritizing snapshots that contain
+// active database files. If candidate keys lack database files, it automatically searches
+// namespaces/ in S3 for historical snapshots belonging to the router or adapter.
 func (b *FastVolumeBridge) HydrateContainerCandidateKeys(ctx context.Context, cli *client.Client, containerID string, candidateKeys []string, targetParentDir string) error {
 	if b.client == nil || cli == nil {
 		return nil
 	}
 
+	var bestKey string
+	var fallbackKey string
+
 	for _, s3Key := range candidateKeys {
-		mu := b.getLock(s3Key)
-		mu.Lock()
-
-		obj, err := b.client.GetObject(ctx, b.bucket, s3Key, minio.GetObjectOptions{})
-		if err != nil {
-			mu.Unlock()
+		exists, size, hasDB, err := b.inspectSnapshot(ctx, s3Key)
+		if err != nil || !exists || size <= 32 {
 			continue
 		}
-
-		stat, err := obj.Stat()
-		if err != nil || stat.Size <= 32 {
-			obj.Close()
-			mu.Unlock()
-			continue
+		if hasDB {
+			bestKey = s3Key
+			break
 		}
-
-		log.Printf("[fast-bridge] Found valid snapshot %s (size: %d bytes) in S3. Hydrating into container %s:%s...", s3Key, stat.Size, containerID[:12], targetParentDir)
-
-		decompStream, err := openArchiveStream(obj)
-		if err != nil {
-			obj.Close()
-			mu.Unlock()
-			log.Printf("[fast-bridge] decompress stream error for %s: %v", s3Key, err)
-			continue
+		if fallbackKey == "" {
+			fallbackKey = s3Key
 		}
+	}
 
-		pr, pw := io.Pipe()
-		go func(key string, stream io.ReadCloser, o *minio.Object, lock *sync.Mutex) {
-			defer o.Close()
-			defer stream.Close()
-			defer lock.Unlock()
+	// If no candidate key contains a database, search S3 namespaces for any historical snapshot with a database!
+	if bestKey == "" {
+		volPattern := "app_data"
+		if strings.Contains(targetParentDir, "server") {
+			volPattern = "app_server_data"
+		}
+		log.Printf("[fast-bridge] No primary candidate keys contained database files. Searching S3 bucket %q for historical snapshots matching *%s*...", b.bucket, volPattern)
 
-			tr := tar.NewReader(stream)
-			tw := tar.NewWriter(pw)
-			defer func() {
-				_ = tw.Close()
-				_ = pw.Close()
-			}()
-
-			for {
-				header, err := tr.Next()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					_ = pw.CloseWithError(err)
-					return
-				}
-
-				// Security: prevent Zip-Slip / path traversal vulnerability
-				cleaned := filepath.Clean(header.Name)
-				if strings.HasPrefix(cleaned, "..") || filepath.IsAbs(cleaned) {
-					continue
-				}
-
-				// Skip stale lockfiles and sockets that crash SQLite / Node / PM2 on boot
-				baseName := filepath.Base(cleaned)
-				if strings.HasSuffix(baseName, ".pid") ||
-					strings.HasSuffix(baseName, ".lock") ||
-					strings.HasSuffix(baseName, ".sock") ||
-					strings.HasSuffix(baseName, ".sock.lock") ||
-					baseName == "pm2.pid" ||
-					baseName == "server.pid" {
-					continue
-				}
-
-				// Protect container executable code from corrupted /app snapshots:
-				// If targetParentDir is "/app" or "/", never overwrite node_modules, package.json, server.js, index.js, bin, etc.
-				if targetParentDir == "/app" || targetParentDir == "/" {
-					topSegment := strings.Split(cleaned, "/")[0]
-					if topSegment == "node_modules" || topSegment == "package.json" || topSegment == "package-lock.json" ||
-						topSegment == "server.js" || topSegment == "index.js" || topSegment == "bin" || topSegment == "dist" ||
-						topSegment == ".next" || topSegment == "build" || topSegment == "src" {
-						continue
-					}
-				}
-
-				// Normalize UID and GID to 0 (root) so Docker userns remap never rejects the archive
-				header.Uid = 0
-				header.Gid = 0
-				header.Uname = ""
-				header.Gname = ""
-				if header.Typeflag == tar.TypeDir {
-					header.Mode = 0777
-				} else {
-					header.Mode = 0666
-				}
-
-				if err := tw.WriteHeader(header); err != nil {
-					_ = pw.CloseWithError(err)
-					return
-				}
-				if _, err := io.Copy(tw, tr); err != nil {
-					_ = pw.CloseWithError(err)
-					return
-				}
+		var largestHistoricalKey string
+		var largestHistoricalSize int64
+		opts := minio.ListObjectsOptions{
+			Prefix:    "namespaces/",
+			Recursive: true,
+		}
+		for obj := range b.client.ListObjects(ctx, b.bucket, opts) {
+			if obj.Err != nil || obj.Size <= 1024 {
+				continue
 			}
-		}(s3Key, decompStream, obj, mu)
-
-		err = cli.CopyToContainer(ctx, containerID, targetParentDir, pr, container.CopyToContainerOptions{
-			AllowOverwriteDirWithFile: true,
-		})
-		if err != nil {
-			log.Printf("[fast-bridge] docker copy to container %s failed for %s: %v", containerID[:12], s3Key, err)
-			continue
+			if !strings.Contains(obj.Key, volPattern) && !strings.Contains(obj.Key, "data") {
+				continue
+			}
+			_, _, histHasDB, _ := b.inspectSnapshot(ctx, obj.Key)
+			if histHasDB && obj.Size > largestHistoricalSize {
+				largestHistoricalKey = obj.Key
+				largestHistoricalSize = obj.Size
+			}
 		}
+		if largestHistoricalKey != "" {
+			log.Printf("[fast-bridge] Found historical snapshot %s (size: %d bytes, contains database). Auto-migrating to container %s!", largestHistoricalKey, largestHistoricalSize, containerID[:12])
+			bestKey = largestHistoricalKey
+		}
+	}
 
-		log.Printf("[fast-bridge] successfully hydrated %s from s3://%s/%s into container %s:%s", s3Key, b.bucket, s3Key, containerID[:12], targetParentDir)
+	selectedKey := bestKey
+	if selectedKey == "" {
+		selectedKey = fallbackKey
+	}
+	if selectedKey == "" {
 		return nil
 	}
 
+	return b.extractKeyToContainer(ctx, cli, containerID, selectedKey, targetParentDir)
+}
+
+func (b *FastVolumeBridge) extractKeyToContainer(ctx context.Context, cli *client.Client, containerID, s3Key, targetParentDir string) error {
+	mu := b.getLock(s3Key)
+	mu.Lock()
+	defer mu.Unlock()
+
+	obj, err := b.client.GetObject(ctx, b.bucket, s3Key, minio.GetObjectOptions{})
+	if err != nil {
+		return err
+	}
+	defer obj.Close()
+
+	stat, err := obj.Stat()
+	if err != nil || stat.Size <= 32 {
+		return nil
+	}
+
+	log.Printf("[fast-bridge] Found valid snapshot %s (size: %d bytes) in S3. Hydrating into container %s:%s...", s3Key, stat.Size, containerID[:12], targetParentDir)
+
+	decompStream, err := openArchiveStream(obj)
+	if err != nil {
+		return fmt.Errorf("decompress stream error for %s: %w", s3Key, err)
+	}
+	defer decompStream.Close()
+
+	pr, pw := io.Pipe()
+	go func() {
+		defer pw.Close()
+
+		tr := tar.NewReader(decompStream)
+		tw := tar.NewWriter(pw)
+		defer tw.Close()
+
+		for {
+			header, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+
+			// Security: prevent Zip-Slip / path traversal vulnerability
+			cleaned := filepath.Clean(header.Name)
+			if strings.HasPrefix(cleaned, "..") || filepath.IsAbs(cleaned) {
+				continue
+			}
+
+			// Skip stale lockfiles and sockets that crash SQLite / Node / PM2 on boot
+			baseName := filepath.Base(cleaned)
+			if strings.HasSuffix(baseName, ".pid") ||
+				strings.HasSuffix(baseName, ".lock") ||
+				strings.HasSuffix(baseName, ".sock") ||
+				strings.HasSuffix(baseName, ".sock.lock") ||
+				baseName == "pm2.pid" ||
+				baseName == "server.pid" {
+				continue
+			}
+
+			// Protect container executable code from corrupted /app snapshots:
+			if targetParentDir == "/app" || targetParentDir == "/" {
+				topSegment := strings.Split(cleaned, "/")[0]
+				if topSegment == "node_modules" || topSegment == "package.json" || topSegment == "package-lock.json" ||
+					topSegment == "server.js" || topSegment == "index.js" || topSegment == "bin" || topSegment == "dist" ||
+					topSegment == ".next" || topSegment == "build" || topSegment == "src" {
+					continue
+				}
+			}
+
+			// Normalize UID and GID to 0 (root) so Docker userns remap never rejects the archive
+			header.Uid = 0
+			header.Gid = 0
+			header.Uname = ""
+			header.Gname = ""
+			if header.Typeflag == tar.TypeDir {
+				header.Mode = 0777
+			} else {
+				header.Mode = 0666
+			}
+
+			if err := tw.WriteHeader(header); err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+			if _, err := io.Copy(tw, tr); err != nil {
+				_ = pw.CloseWithError(err)
+				return
+			}
+		}
+	}()
+
+	err = cli.CopyToContainer(ctx, containerID, targetParentDir, pr, container.CopyToContainerOptions{
+		AllowOverwriteDirWithFile: true,
+	})
+	if err != nil {
+		return fmt.Errorf("docker copy to container %s failed for %s: %w", containerID[:12], s3Key, err)
+	}
+
+	log.Printf("[fast-bridge] successfully hydrated %s from s3://%s/%s into container %s:%s", s3Key, b.bucket, s3Key, containerID[:12], targetParentDir)
 	return nil
 }
 
@@ -503,6 +603,7 @@ func (b *FastVolumeBridge) SnapshotContainer(ctx context.Context, cli *client.Cl
 	tr := tar.NewReader(reader)
 	tw := tar.NewWriter(zw)
 	fileCount := 0
+	hasDB := false
 
 	for {
 		header, err := tr.Next()
@@ -511,6 +612,10 @@ func (b *FastVolumeBridge) SnapshotContainer(ctx context.Context, cli *client.Cl
 		}
 		if err != nil {
 			break
+		}
+
+		if isDatabaseFile(header.Name) {
+			hasDB = true
 		}
 
 		// Skip stale lockfiles and sockets during snapshot creation
@@ -551,6 +656,15 @@ func (b *FastVolumeBridge) SnapshotContainer(ctx context.Context, cli *client.Cl
 	// Avoid uploading empty archives
 	if fileCount == 0 || buf.Len() <= 32 {
 		return nil
+	}
+
+	// Safety check: before overwriting an existing snapshot, verify we aren't destroying database state
+	if !hasDB {
+		existingExists, _, existingHasDB, _ := b.inspectSnapshot(ctx, s3Key)
+		if existingExists && existingHasDB {
+			log.Printf("[fast-bridge] SAFETY GUARD: skipping snapshot for %s: container %s contains 0 database files, refusing to overwrite existing valid S3 database snapshot", s3Key, containerID[:12])
+			return nil
+		}
 	}
 
 	payload := buf.Bytes()

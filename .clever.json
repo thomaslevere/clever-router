@@ -1,10 +1,10 @@
 {
   "apps": [
     {
-      "app_id": "app_03f2fea6-fdc7-44dd-8d54-1c3edd206074",
-      "org_id": "user_9aa7908a-178f-4c48-88b9-f280cab9c4da",
-      "deploy_url": "https://github.com/thomaslevere/clever-router.git",
-      "git_ssh_url": "https://github.com/thomaslevere/clever-router.git",
+      "app_id": "app_56365bc2-f93c-42bf-b51a-8fe2d7654593",
+      "org_id": "user_2565ddcb-a4c1-4735-a80e-db3ce8712acf",
+      "deploy_url": "git+ssh://git@push.par.clever-cloud.com/app_56365bc2-f93c-42bf-b51a-8fe2d7654593.git",
+      "git_ssh_url": "git+ssh://git@push.par.clever-cloud.com/app_56365bc2-f93c-42bf-b51a-8fe2d7654593.git",
       "name": "clever-router",
       "alias": "clever-router"
     }

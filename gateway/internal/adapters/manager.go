@@ -971,7 +971,7 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 		if p := ad.NativePanelPath(r); p != "" && p != ad.HealthPath(r) {
 			probePaths = append(probePaths, p)
 		}
-		probePaths = append(probePaths, "/login", "/", "/dashboard", "/v1/models")
+		probePaths = append(probePaths, "/login", "/dashboard", "/")
 
 		var directSuccess bool
 		for _, p := range probePaths {
@@ -1334,7 +1334,7 @@ func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapte
 	if p := ad.NativePanelPath(r); p != "" && p != ad.HealthPath(r) {
 		probePaths = append(probePaths, p)
 	}
-	probePaths = append(probePaths, "/login", "/", "/v1/models")
+	probePaths = append(probePaths, "/login", "/dashboard", "/")
 
 	for time.Now().Before(deadline) {
 		candidates := m.getCandidates(ctx, containerID, port)
@@ -1441,9 +1441,9 @@ func (m *Manager) checkAnyWorking(ctx context.Context, containerID string, port 
 	probeClient := &http.Client{Timeout: 3 * time.Second}
 	paths := []string{healthPath}
 	if healthPath != "" && healthPath != "/" {
-		paths = append(paths, "/login", "/dashboard", "/", "/v1/models")
+		paths = append(paths, "/login", "/dashboard", "/")
 	} else {
-		paths = append(paths, "/login", "/dashboard", "/v1/models")
+		paths = append(paths, "/login", "/dashboard")
 	}
 	for _, cand := range candidates {
 		for _, p := range paths {

@@ -1659,10 +1659,10 @@ func (a *API) manualS3Restore(c *gin.Context) {
 		return
 	}
 
-	// 1. If router was running, stop it to release SQLite WAL & file locks
+	// 1. If router was running, stop it WITHOUT snapshotting so broken/empty container state does not overwrite S3
 	wasRunning := r.RuntimeState == "running" || r.ContainerID != ""
 	if wasRunning {
-		if err := a.manager.Stop(c.Request.Context(), r); err != nil {
+		if err := a.manager.StopWithoutSnapshot(c.Request.Context(), r); err != nil {
 			log.Printf("[api] warning stopping router before restore: %v", err)
 		}
 	}

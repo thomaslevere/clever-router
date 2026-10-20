@@ -119,3 +119,30 @@ func TestFastVolumeBridgeEmptySourceDir(t *testing.T) {
 		t.Fatalf("expected nil on nonexistent directory, got %v", err)
 	}
 }
+
+func TestIsDatabaseFile(t *testing.T) {
+	testCases := []struct {
+		name     string
+		expected bool
+	}{
+		{"data/storage.sqlite", true},
+		{"data/server.env", true},
+		{"data/freeapi.db", true},
+		{"data/one-api.db", true},
+		{"data/config.db", true},
+		{"data/connect.sqlite", true},
+		{"data/jwt-secret", true},
+		{"data/machine-id", true},
+		{"data/storage.sqlite-wal", true},
+		{"data/cache/openrouter-catalog.json", false},
+		{"data/logs/app.log", false},
+		{"data/node_modules/package.json", false},
+	}
+
+	for _, tc := range testCases {
+		res := isDatabaseFile(tc.name)
+		if res != tc.expected {
+			t.Errorf("isDatabaseFile(%q) = %v, want %v", tc.name, res, tc.expected)
+		}
+	}
+}

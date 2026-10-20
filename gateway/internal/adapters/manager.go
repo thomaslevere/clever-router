@@ -439,10 +439,13 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 			candidateKeys := []string{
 				fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized),
 				fmt.Sprintf("namespaces/%s/%s.tar.zst", r.Slug, sanitized),
+				fmt.Sprintf("namespaces/%s/%s.tar.zst", r.AdapterType, sanitized),
 				fmt.Sprintf("namespaces/%s/%s.tar.gz", r.ID, sanitized),
 				fmt.Sprintf("namespaces/%s/%s.tar.gz", r.Slug, sanitized),
+				fmt.Sprintf("namespaces/%s/%s.tar.gz", r.AdapterType, sanitized),
 				fmt.Sprintf("namespaces/%s/%s.tar", r.ID, sanitized),
 				fmt.Sprintf("namespaces/%s/%s.tar", r.Slug, sanitized),
+				fmt.Sprintf("namespaces/%s/%s.tar", r.AdapterType, sanitized),
 			}
 			targetParent := filepath.Dir(targetVol)
 			if targetParent == "" || targetParent == "." {
@@ -517,15 +520,29 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 
 // Stop removes the router's container and clears its route, flushing volume snapshots to S3.
 func (m *Manager) Stop(ctx context.Context, r *store.Router) error {
+	return m.StopWithSnapshotOption(ctx, r, true)
+}
+
+// StopWithoutSnapshot removes the router's container without snapshotting current container state to S3.
+// Useful during manual restore so broken/empty container state does not overwrite the S3 backup.
+func (m *Manager) StopWithoutSnapshot(ctx context.Context, r *store.Router) error {
+	return m.StopWithSnapshotOption(ctx, r, false)
+}
+
+func (m *Manager) StopWithSnapshotOption(ctx context.Context, r *store.Router, withSnapshot bool) error {
 	val, _ := m.routerLocks.LoadOrStore(r.ID, &sync.Mutex{})
 	mu := val.(*sync.Mutex)
 	mu.Lock()
 	defer mu.Unlock()
 
-	return m.stopLocked(ctx, r)
+	return m.stopLockedInternal(ctx, r, withSnapshot)
 }
 
 func (m *Manager) stopLocked(ctx context.Context, r *store.Router) error {
+	return m.stopLockedInternal(ctx, r, true)
+}
+
+func (m *Manager) stopLockedInternal(ctx context.Context, r *store.Router, withSnapshot bool) error {
 	m.emitEvent(r.ID, "state_changed", map[string]any{
 		"status":        "stopping",
 		"runtime_state": "stopping",
@@ -533,8 +550,8 @@ func (m *Manager) stopLocked(ctx context.Context, r *store.Router) error {
 		"slug":          r.Slug,
 	})
 
-	// 1. Snapshot volumes to S3 directly from running container BEFORE stopping
-	if m.bridge != nil && r.ContainerID != "" {
+	// 1. Snapshot volumes to S3 directly from running container BEFORE stopping if requested
+	if withSnapshot && m.bridge != nil && r.ContainerID != "" {
 		_ = m.Snapshot(ctx, r)
 	}
 
@@ -582,9 +599,15 @@ func (m *Manager) Snapshot(ctx context.Context, r *store.Router) error {
 		s3KeyID := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized)
 		if err := m.bridge.SnapshotContainer(ctx, m.docker, r.ContainerID, targetVol, s3KeyID); err != nil {
 			log.Printf("[manager] snapshot warning for %s (%s): %v", r.Slug, s3KeyID, err)
-		} else if r.Slug != "" && r.Slug != r.ID {
-			s3KeySlug := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.Slug, sanitized)
-			_ = m.bridge.CopyS3Object(ctx, s3KeyID, s3KeySlug)
+		} else {
+			if r.Slug != "" && r.Slug != r.ID {
+				s3KeySlug := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.Slug, sanitized)
+				_ = m.bridge.CopyS3Object(ctx, s3KeyID, s3KeySlug)
+			}
+			if r.AdapterType != "" && r.AdapterType != r.Slug && r.AdapterType != r.ID {
+				s3KeyAdapter := fmt.Sprintf("namespaces/%s/%s.tar.zst", r.AdapterType, sanitized)
+				_ = m.bridge.CopyS3Object(ctx, s3KeyID, s3KeyAdapter)
+			}
 		}
 	}
 	return nil
@@ -611,10 +634,13 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, r *store.Router) error {
 		candidateKeys := []string{
 			fmt.Sprintf("namespaces/%s/%s.tar.zst", r.ID, sanitized),
 			fmt.Sprintf("namespaces/%s/%s.tar.zst", r.Slug, sanitized),
+			fmt.Sprintf("namespaces/%s/%s.tar.zst", r.AdapterType, sanitized),
 			fmt.Sprintf("namespaces/%s/%s.tar.gz", r.ID, sanitized),
 			fmt.Sprintf("namespaces/%s/%s.tar.gz", r.Slug, sanitized),
+			fmt.Sprintf("namespaces/%s/%s.tar.gz", r.AdapterType, sanitized),
 			fmt.Sprintf("namespaces/%s/%s.tar", r.ID, sanitized),
 			fmt.Sprintf("namespaces/%s/%s.tar", r.Slug, sanitized),
+			fmt.Sprintf("namespaces/%s/%s.tar", r.AdapterType, sanitized),
 		}
 		targetParent := filepath.Dir(targetVol)
 		if targetParent == "" || targetParent == "." {

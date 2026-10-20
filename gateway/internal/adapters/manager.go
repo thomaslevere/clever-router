@@ -231,7 +231,10 @@ func (m *Manager) InspectImageVolumes(ctx context.Context, imageName string) ([]
 func (m *Manager) Start(ctx context.Context, r *store.Router) error {
 	val, _ := m.routerLocks.LoadOrStore(r.ID, &sync.Mutex{})
 	mu := val.(*sync.Mutex)
-	mu.Lock()
+	if !mu.TryLock() {
+		log.Printf("[manager] start for %s already in progress; skipping duplicate concurrent start", r.Slug)
+		return nil
+	}
 	defer mu.Unlock()
 
 	err := m.startLocked(ctx, r, true)
@@ -462,7 +465,8 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		return fmt.Errorf("start container: %w", err)
 	}
 
-	workingAddr, ok := m.waitForHealthy(ctx, r, ad, created.ID, ad.InternalPort(r), 180*time.Second)
+	startupTimeout := 180 * time.Second
+	workingAddr, ok := m.waitForHealthy(ctx, r, ad, created.ID, ad.InternalPort(r), startupTimeout)
 	if !ok {
 		fallbackAddr := "http://127.0.0.1"
 		if cands := m.getCandidates(ctx, created.ID, ad.InternalPort(r)); len(cands) > 0 {
@@ -479,7 +483,7 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 			"desired_state": "running",
 			"slug":          r.Slug,
 		})
-		return fmt.Errorf("router %s started but did not pass health check within 90s", r.Slug)
+		return fmt.Errorf("router %s started but did not pass health check within %v", r.Slug, startupTimeout)
 	}
 
 	panel := fmt.Sprintf("/%s%s", r.Slug, ad.NativePanelPath(r))
@@ -957,31 +961,42 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 	}
 
 	targetAddr := r.TargetAddr
-	probeClient := &http.Client{Timeout: 1500 * time.Millisecond}
+	probeClient := &http.Client{Timeout: 5 * time.Second}
 	var probeErr error
 	var latency int64
 
-	// 1. Fast probe existing TargetAddr if already assigned.
+	// 1. Fast probe existing TargetAddr across health/models/login paths if already assigned.
 	if targetAddr != "" {
-		url := strings.TrimRight(targetAddr, "/") + ad.HealthPath(r)
-		start := time.Now()
-		req, reqErr := http.NewRequestWithContext(ctx, "GET", url, nil)
-		if reqErr == nil {
-			resp, err := probeClient.Do(req)
-			latency = time.Since(start).Milliseconds()
-			if err != nil || (resp != nil && resp.StatusCode >= 500) {
-				if resp != nil {
+		probePaths := []string{ad.HealthPath(r)}
+		if p := ad.NativePanelPath(r); p != "" && p != ad.HealthPath(r) {
+			probePaths = append(probePaths, p)
+		}
+		probePaths = append(probePaths, "/v1/models", "/login", "/")
+
+		var directSuccess bool
+		for _, p := range probePaths {
+			url := strings.TrimRight(targetAddr, "/") + p
+			start := time.Now()
+			req, reqErr := http.NewRequestWithContext(ctx, "GET", url, nil)
+			if reqErr == nil {
+				resp, err := probeClient.Do(req)
+				latency = time.Since(start).Milliseconds()
+				if err == nil && resp != nil {
+					status := resp.StatusCode
 					resp.Body.Close()
-					probeErr = fmt.Errorf("status %d", resp.StatusCode)
-				} else {
+					if status < 500 {
+						probeErr = nil
+						directSuccess = true
+						break
+					}
+					probeErr = fmt.Errorf("status %d", status)
+				} else if err != nil {
 					probeErr = err
 				}
-			} else if resp != nil {
-				resp.Body.Close()
-				probeErr = nil
 			}
-		} else {
-			probeErr = reqErr
+		}
+		if !directSuccess && probeErr == nil {
+			probeErr = fmt.Errorf("probe failed")
 		}
 	} else {
 		probeErr = fmt.Errorf("no target address")
@@ -1015,7 +1030,11 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 	if probeErr != nil {
 		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", int(latency), probeErr.Error())
 		_ = m.store.UpdateRouterState(ctx, r.ID, "unhealthy", r.TargetAddr, r.ContainerID, r.NativePanelURL, "unhealthy")
-		m.table.Delete(r.Slug)
+		// Guard against transient flapping: only evict from hot routing table if container is actually stopped/dead
+		cName := containerPrefix + r.Slug
+		if cInspect, err := m.docker.ContainerInspect(ctx, cName); err != nil || cInspect.State == nil || !cInspect.State.Running {
+			m.table.Delete(r.Slug)
+		}
 		m.emitEvent(r.ID, "state_changed", map[string]any{
 			"status":        "unhealthy",
 			"health_status": "unhealthy",
@@ -1283,7 +1302,7 @@ func (m *Manager) waitForHealthy(ctx context.Context, r *store.Router, ad Adapte
 	deadline := time.Now().Add(maxWait)
 	interval := 400 * time.Millisecond
 	const maxInterval = 3 * time.Second
-	probeClient := &http.Client{Timeout: 1500 * time.Millisecond}
+	probeClient := &http.Client{Timeout: 4 * time.Second}
 
 	// Warm-up grace period: Give container process 1.5 seconds to load runtime before first probe
 	select {
@@ -1400,7 +1419,7 @@ func countProviders(models []store.Model) int {
 
 func (m *Manager) checkAnyWorking(ctx context.Context, containerID string, port int, healthPath string) (string, bool) {
 	candidates := m.getCandidates(ctx, containerID, port)
-	probeClient := &http.Client{Timeout: 1500 * time.Millisecond}
+	probeClient := &http.Client{Timeout: 3 * time.Second}
 	paths := []string{healthPath}
 	if healthPath != "" && healthPath != "/" {
 		paths = append(paths, "/", "/login", "/v1/models")

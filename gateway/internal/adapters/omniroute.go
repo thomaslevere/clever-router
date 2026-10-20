@@ -28,14 +28,15 @@ func (OmniRouteAdapter) InternalPort(r *store.Router) int {
 	return 20128
 }
 
-// HealthPath returns a lightweight path used only for readiness probes.
-// OmniRoute includes a native /healthz route that responds immediately with 'ok'
-// and zero database/auth overhead.
+// HealthPath returns a lightweight path used for readiness probes.
+// We default to /v1/models rather than /healthz because OmniRoute's internal
+// /healthz route rejects probes whenever background token refresh or model sync
+// causes event loop lag.
 func (OmniRouteAdapter) HealthPath(r *store.Router) string {
 	if p := strConfig(r, "health_path"); p != "" {
 		return p
 	}
-	return "/healthz"
+	return "/v1/models"
 }
 
 // ModelsPath is the OpenAI-compatible model listing endpoint.

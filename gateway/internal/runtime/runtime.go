@@ -43,7 +43,7 @@ func (s *Supervisor) Listen(ctx context.Context) {
 			s.table.Delete(ev.Slug)
 			continue
 		}
-		if r.RuntimeState == "running" && r.TargetAddr != "" {
+		if r.TargetAddr != "" && r.RuntimeState != "stopped" && r.RuntimeState != "failed" {
 			s.table.Set(r.Slug, r.TargetAddr)
 		} else {
 			s.table.Delete(r.Slug)

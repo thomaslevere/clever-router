@@ -971,7 +971,7 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 		if p := ad.NativePanelPath(r); p != "" && p != ad.HealthPath(r) {
 			probePaths = append(probePaths, p)
 		}
-		probePaths = append(probePaths, "/v1/models", "/login", "/")
+		probePaths = append(probePaths, "/login", "/", "/dashboard", "/v1/models")
 
 		var directSuccess bool
 		for _, p := range probePaths {
@@ -1002,11 +1002,13 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 		probeErr = fmt.Errorf("no target address")
 	}
 
-	// 2. Only inspect Docker container and scan candidates if targetAddr was empty or the direct probe failed.
-	if probeErr != nil {
-		cName := containerPrefix + r.Slug
-		if cInspect, err := m.docker.ContainerInspect(ctx, cName); err == nil && cInspect.State != nil && cInspect.State.Running {
-			r.ContainerID = cInspect.ID
+	// 2. Inspect Docker container to track the actual container process state.
+	var containerRunning bool
+	cName := containerPrefix + r.Slug
+	if cInspect, err := m.docker.ContainerInspect(ctx, cName); err == nil && cInspect.State != nil && cInspect.State.Running {
+		containerRunning = true
+		r.ContainerID = cInspect.ID
+		if probeErr != nil {
 			if workingAddr, ok := m.checkAnyWorking(ctx, cInspect.ID, ad.InternalPort(r), ad.HealthPath(r)); ok {
 				targetAddr = workingAddr
 				probeErr = nil
@@ -1015,26 +1017,43 @@ func (m *Manager) HealthCheck(ctx context.Context, r *store.Router) error {
 	}
 
 	if targetAddr == "" {
-		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", 0, "no target address")
-		_ = m.store.UpdateRouterState(ctx, r.ID, "stopped", "", "", "", "unknown")
-		m.table.Delete(r.Slug)
-		m.emitEvent(r.ID, "state_changed", map[string]any{
-			"status":        "stopped",
-			"health_status": "unknown",
-			"runtime_state": "stopped",
-			"slug":          r.Slug,
-		})
-		return fmt.Errorf("no target address")
+		if !containerRunning {
+			_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", 0, "container stopped and no target address")
+			_ = m.store.UpdateRouterState(ctx, r.ID, "stopped", "", "", "", "unknown")
+			m.table.Delete(r.Slug)
+			m.emitEvent(r.ID, "state_changed", map[string]any{
+				"status":        "stopped",
+				"health_status": "unknown",
+				"runtime_state": "stopped",
+				"slug":          r.Slug,
+			})
+			return fmt.Errorf("no target address")
+		}
 	}
 
 	if probeErr != nil {
+		// When Docker confirms the container is alive and running, an HTTP error (such as 500/502/503 from an internal AI provider)
+		// is an application-level/provider condition, NOT a container crash.
+		// The container MUST NOT be knocked offline or evicted from the hot routing table!
+		if containerRunning {
+			_ = m.store.InsertHealthCheck(ctx, r.ID, "degraded", int(latency), probeErr.Error())
+			panel := fmt.Sprintf("/%s%s", r.Slug, ad.NativePanelPath(r))
+			_ = m.store.UpdateRouterState(ctx, r.ID, "running", targetAddr, r.ContainerID, panel, "degraded")
+			m.table.Set(r.Slug, targetAddr)
+			_ = m.cache.SetRoute(ctx, r.Slug, targetAddr)
+			m.emitEvent(r.ID, "state_changed", map[string]any{
+				"status":        "running",
+				"health_status": "degraded",
+				"runtime_state": "running",
+				"slug":          r.Slug,
+			})
+			return nil
+		}
+
+		// Only if container is NOT running in Docker, mark unhealthy and evict from routing table
 		_ = m.store.InsertHealthCheck(ctx, r.ID, "unhealthy", int(latency), probeErr.Error())
 		_ = m.store.UpdateRouterState(ctx, r.ID, "unhealthy", r.TargetAddr, r.ContainerID, r.NativePanelURL, "unhealthy")
-		// Guard against transient flapping: only evict from hot routing table if container is actually stopped/dead
-		cName := containerPrefix + r.Slug
-		if cInspect, err := m.docker.ContainerInspect(ctx, cName); err != nil || cInspect.State == nil || !cInspect.State.Running {
-			m.table.Delete(r.Slug)
-		}
+		m.table.Delete(r.Slug)
 		m.emitEvent(r.ID, "state_changed", map[string]any{
 			"status":        "unhealthy",
 			"health_status": "unhealthy",
@@ -1422,7 +1441,9 @@ func (m *Manager) checkAnyWorking(ctx context.Context, containerID string, port 
 	probeClient := &http.Client{Timeout: 3 * time.Second}
 	paths := []string{healthPath}
 	if healthPath != "" && healthPath != "/" {
-		paths = append(paths, "/", "/login", "/v1/models")
+		paths = append(paths, "/login", "/dashboard", "/", "/v1/models")
+	} else {
+		paths = append(paths, "/login", "/dashboard", "/v1/models")
 	}
 	for _, cand := range candidates {
 		for _, p := range paths {
@@ -1433,10 +1454,12 @@ func (m *Manager) checkAnyWorking(ctx context.Context, containerID string, port 
 			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 			if err == nil {
 				resp, err := probeClient.Do(req)
-				if err == nil {
+				if err == nil && resp != nil {
 					status := resp.StatusCode
 					resp.Body.Close()
-					if status < 500 {
+					// Any HTTP status (including 2xx, 3xx, 4xx, and 5xx from internal provider errors)
+					// proves this candidate IP/port successfully routed to the container's web server.
+					if status > 0 {
 						return cand, true
 					}
 				}
@@ -1577,13 +1600,19 @@ func (m *Manager) ExecInContainer(ctx context.Context, containerID string, cmd [
 	defer resp.Close()
 
 	var stdout, stderr bytes.Buffer
-	_, _ = stdcopy.StdCopy(&stdout, &stderr, resp.Reader)
+	_, copyErr := stdcopy.StdCopy(&stdout, &stderr, resp.Reader)
 	combined := stdout.String()
 	if stderr.Len() > 0 {
 		if combined != "" {
 			combined += "\n"
 		}
 		combined += stderr.String()
+	}
+	if combined == "" && copyErr != nil {
+		raw, _ := io.ReadAll(resp.Reader)
+		if len(raw) > 0 {
+			combined = string(raw)
+		}
 	}
 	return combined, nil
 }

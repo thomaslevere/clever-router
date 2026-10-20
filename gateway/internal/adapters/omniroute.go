@@ -34,7 +34,7 @@ func (OmniRouteAdapter) InternalPort(r *store.Router) int {
 // causes event loop lag, and /v1/models touches upstream provider states.
 // /login tests the container's HTTP web server directly without triggering upstream AI calls.
 func (OmniRouteAdapter) HealthPath(r *store.Router) string {
-	if p := strConfig(r, "health_path"); p != "" {
+	if p := strConfig(r, "health_path"); p != "" && p != "/v1/models" && p != "/healthz" {
 		return p
 	}
 	return "/login"

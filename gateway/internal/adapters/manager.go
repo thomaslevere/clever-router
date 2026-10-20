@@ -462,7 +462,7 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		return fmt.Errorf("start container: %w", err)
 	}
 
-	workingAddr, ok := m.waitForHealthy(ctx, r, ad, created.ID, ad.InternalPort(r), 90*time.Second)
+	workingAddr, ok := m.waitForHealthy(ctx, r, ad, created.ID, ad.InternalPort(r), 180*time.Second)
 	if !ok {
 		fallbackAddr := "http://127.0.0.1"
 		if cands := m.getCandidates(ctx, created.ID, ad.InternalPort(r)); len(cands) > 0 {

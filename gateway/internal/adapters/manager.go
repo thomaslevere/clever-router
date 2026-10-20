@@ -465,7 +465,7 @@ func (m *Manager) startLocked(ctx context.Context, r *store.Router, checkExistin
 		return fmt.Errorf("start container: %w", err)
 	}
 
-	startupTimeout := 180 * time.Second
+	startupTimeout := 300 * time.Second
 	workingAddr, ok := m.waitForHealthy(ctx, r, ad, created.ID, ad.InternalPort(r), startupTimeout)
 	if !ok {
 		fallbackAddr := "http://127.0.0.1"
@@ -726,7 +726,7 @@ func (m *Manager) ReconcileAndStartAll(ctx context.Context) error {
 		_ = m.store.SetDesiredState(ctx, r.ID, "running")
 
 		go func(router store.Router) {
-			bootCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			bootCtx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 			defer cancel()
 			if err := m.Start(bootCtx, &router); err != nil {
 				log.Printf("[reconcile] failed to start %s: %v", router.Slug, err)

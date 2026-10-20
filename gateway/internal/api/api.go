@@ -811,7 +811,7 @@ func (a *API) startRouter(c *gin.Context) {
 				_ = a.store.UpdateRouterState(context.Background(), target.ID, "failed", "", "", "", "unhealthy")
 			}
 		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 		defer cancel()
 		if err := a.manager.Start(ctx, &target); err != nil {
 			log.Printf("[api] start %s: %v", target.Slug, err)
